@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fabricpy.compiler.forge_gen import _uses_geckolib, generate_forge_project
+from fabricpy.compiler.forge_gen import _uses_geckolib, _forge_repository_lines, generate_forge_project
+from fabricpy.compiler.dependencies import dependencies_for_loader, gradle_notation
 from fabricpy.compiler.versions import NEOFORGE_VERSIONS
 
 
@@ -14,7 +15,7 @@ def generate_neoforge_project(mod, project_dir: Path):
     if mod._packets:
         raise ValueError("NeoForge packet generation is not implemented yet; remove mod.packet(...) or target fabric/forge.")
 
-    generate_forge_project(mod, project_dir)
+    generate_forge_project(mod, project_dir, loader_name="neoforge")
     _rewrite_java_sources(project_dir)
     _rewrite_mods_toml(mod, project_dir, version_meta)
     _write_neoforge_gradle_files(mod, project_dir, version_meta)
@@ -37,7 +38,87 @@ def _rewrite_java_sources(project_dir: Path):
         for old, new in replacements:
             text = text.replace(old, new)
         text = text.replace("modId=\"forge\"", "modId=\"neoforge\"")
+        text = _adapt_neoforge_121_java(text)
         path.write_text(text, encoding="utf-8")
+
+
+def _adapt_neoforge_121_java(text: str) -> str:
+    """Adapt shared Forge source to the explicit 1.21.1 NeoForge API surface."""
+    text = text.replace("import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;\n", "")
+    text = re.sub(
+        r"public ([A-Za-z_$][\w$]*)\(\) \{\s*IEventBus bus = FMLJavaModLoadingContext\.get\(\)\.getModEventBus\(\);",
+        r"public \1(IEventBus bus) {", text,
+    )
+    text = text.replace("import net.neoforged.neoforge.registries.ForgeRegistries;",
+                        "import net.minecraft.core.registries.BuiltInRegistries;")
+    text = text.replace("import net.neoforged.neoforge.registries.RegistryObject;", "import java.util.function.Supplier;")
+    text = text.replace("RegistryObject<", "Supplier<")
+    text = re.sub(r"event\.accept\(([A-Z_][A-Z0-9_]*)\)", r"event.accept(\1.get())", text)
+    registries = {
+        "BLOCK_ENTITY_TYPES": "BLOCK_ENTITY_TYPE", "PARTICLE_TYPES": "PARTICLE_TYPE",
+        "ENTITY_TYPES": "ENTITY_TYPE", "SOUND_EVENTS": "SOUND_EVENT",
+        "MOB_EFFECTS": "MOB_EFFECT", "BLOCKS": "BLOCK", "ITEMS": "ITEM",
+    }
+    for forge_name, builtin_name in registries.items():
+        text = text.replace(f"ForgeRegistries.{forge_name}", f"BuiltInRegistries.{builtin_name}")
+    text = re.sub(r"(BuiltInRegistries\.[A-Z_]+)\.getValue\(", r"\1.get(", text)
+    text = _rewrite_resource_locations(text)
+    text = text.replace("ClipContext.Fluid.NONE, null", "ClipContext.Fluid.NONE, (net.minecraft.world.entity.Entity) null")
+    # 1.21 separates item-bearing interactions from empty-hand block interaction.
+    use_pattern = re.compile(
+        r"public InteractionResult use\(BlockState state, Level level, BlockPos pos,\s*"
+        r"Player player, InteractionHand hand, BlockHitResult hit\) \{(.*?)\n    \}", re.DOTALL,
+    )
+    def replace_use(match):
+        body = match.group(1).replace("        ItemStack stack = player.getItemInHand(hand);\n", "")
+        body = body.replace("return InteractionResult.", "return net.minecraft.world.ItemInteractionResult.")
+        return (
+            "public net.minecraft.world.ItemInteractionResult useItemOn(ItemStack stack, BlockState state, Level level, BlockPos pos,\n"
+            "                                  Player player, InteractionHand hand, BlockHitResult hit) {" + body + "\n    }\n\n"
+            "    @Override\n"
+            "    public InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n"
+            "        return useItemOn(player.getMainHandItem(), state, level, pos, player, InteractionHand.MAIN_HAND, hit).result();\n"
+            "    }"
+        )
+    return use_pattern.sub(replace_use, text)
+
+
+def _rewrite_resource_locations(text: str) -> str:
+    """Choose the 1.21 factory while retaining nested expressions and string commas."""
+    pattern = re.compile(r"new ((?:net\.minecraft\.resources\.)?ResourceLocation)\(")
+    result = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        if match.start() < cursor:
+            continue
+        depth, commas, quote, escaped = 1, 0, None, False
+        end = match.end()
+        while end < len(text) and depth:
+            char = text[end]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+            elif char in {'"', "'"}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char == "," and depth == 1:
+                commas += 1
+            end += 1
+        if depth:
+            continue
+        factory = "fromNamespaceAndPath" if commas else "parse"
+        result.append(text[cursor:match.start()])
+        result.append(f"{match.group(1)}.{factory}(" + text[match.end():end])
+        cursor = end
+    result.append(text[cursor:])
+    return "".join(result)
 
 
 def _rewrite_mods_toml(mod, project_dir: Path, version_meta):
@@ -46,11 +127,16 @@ def _rewrite_mods_toml(mod, project_dir: Path, version_meta):
     text = text.replace('modId="forge"', 'modId="neoforge"')
     text = re.sub(r'versionRange="[^"]+"', f'versionRange="{version_meta.neoforge_dep}"', text, count=1)
     text = re.sub(r'loaderVersion="[^"]+"', f'loaderVersion="{version_meta.loader_version}"', text, count=1)
-    path.write_text(text, encoding="utf-8")
+    text = text.replace("mandatory=true", 'type="required"')
+    dest = path.with_name("neoforge.mods.toml")
+    dest.write_text(text, encoding="utf-8")
+    path.unlink()
 
 
 def _write_neoforge_gradle_files(mod, project_dir: Path, version_meta):
     mc = mod.minecraft_version
+    extra_repos = _forge_repository_lines(mod, "neoforge")
+    extra_deps = [f"    {dep.scope or 'implementation'} {gradle_notation(dep)}" for dep in dependencies_for_loader(mod, "neoforge")]
     use_geckolib = _uses_geckolib(mod)
     geckolib_repo = (
         "    maven { url = 'https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/' }"
@@ -100,11 +186,13 @@ neoForge {{
 }}
 
 repositories {{
+{chr(10).join(extra_repos)}
 {geckolib_repo}
     mavenCentral()
 }}
 
 dependencies {{
+{chr(10).join(extra_deps)}
 {geckolib_dep}
 }}
 

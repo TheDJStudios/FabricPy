@@ -161,3 +161,45 @@ Cause:
 
 - the build may have had no scan-worthy dependency jars
 - non-geo builds with no explicit dependencies will often have an empty dependency symbol index, which is expected
+
+## Command line and generation without a build
+
+Install from the checkout with `python -m pip install -e .`, then use:
+
+```sh
+fabricpy generate my_mod.py
+fabricpy build my_mod.py --loader all
+fabricpy build my_mod.py --loader forge --output dist --clean
+fabricpy loaders
+```
+
+The module form `python -m fabricpy` accepts the same arguments. The source must
+expose a `Mod` named `mod`. Its `if __name__ == "__main__"` block is not executed
+by the CLI. Resource paths are relative to the source file's directory. Build
+failures produce exit status 1.
+
+From Python, `mod.generate()` returns `{loader: project_path}` without invoking
+Gradle. `mod.compile()` returns `{loader: bool}`. Inspect those results when
+integrating FabricPy with another tool. A Gradle success with no distributable
+JAR is reported as a failure. Wrapper setup checks the script, properties, and
+wrapper JAR together, so an incomplete first setup is retried.
+
+Dependency builds resolve the Gradle compile classpath before their final Java
+generation. This avoids needing a successful first compilation to discover
+constructors in a dependency mod.
+
+Unsupported Python syntax now raises a line-specific `TranspileError`; it is no
+longer replaced by a comment that discards behavior. Supported fixes include
+reassignment, descending literal-step ranges, string literal inequality,
+null-safe string comparisons, string escapes, and Python integer floor division.
+The transpiler still uses Java local types and scopes: keep a variable's type
+stable, initialize shared variables before branches, and do not rely on a loop
+variable after the loop. Python's dynamic typing and full collection semantics
+are not implemented.
+
+A starter can be created with `fabricpy init my_mod --mod-id example --loader all`.
+It includes an editable Python block definition and a placeholder PNG. The target
+directory must not already exist, so initialization cannot overwrite a project.
+NeoForge can run Gradle on Java 17 and provision a Java 21 compiler via its Gradle
+toolchain; other backends continue requiring the target Java version to run their
+build plugins.

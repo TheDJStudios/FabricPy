@@ -8,7 +8,9 @@ This page is the authoring guide for addon developers.
 
 ## What An Addon Is
 
-An addon is a Python module discovered from the `fabricpy/addons/...` folder tree.
+An addon is a Python module named `addon.py`, discovered from a project-level
+`fabricpy_addons/` tree, an external `FABRICPY_ADDON_PATH` root, or the bundled
+`fabricpy/addons/` tree.
 
 An addon declares:
 
@@ -26,30 +28,25 @@ For loader addons:
 
 ## Folder Layout
 
-Addons live under:
-
-- `fabricpy/addons/<kind>/<target>/<minecraft_version>/<addon_name>/addon.py`
-
-Examples:
-
-- `fabricpy/addons/loader/fabric/1.20.1/builtin/addon.py`
-- `fabricpy/addons/loader/forge/1.21.1/builtin/addon.py`
-- `fabricpy/addons/loader/quilt/1.20.1/my_quilt_support/addon.py`
-
-Recommended addon package layout:
+Place project addons under `fabricpy_addons/`, for example:
 
 ```text
-fabricpy/
-  addons/
-    loader/
-      quilt/
-        1.20.1/
-          my_quilt_support/
-            addon.py
-            quilt_gen.py
-            api_maps.py
-            templates/
+fabricpy_addons/
+  my_quilt_support/
+    addon.py
+    quilt_gen.py
+    api_maps.py
+    templates/
 ```
+
+Discovery is recursive; folder names do not determine targets. The constants in
+`addon.py` select the loader and Minecraft version. For reusable addons, place the
+same layout in a root listed in `FABRICPY_ADDON_PATH`.
+
+Builtins use `fabricpy/addons/<kind>/<target>/<minecraft_version>/<name>/addon.py`
+or a version-independent `<target>/builtin/addon.py` with `MINECRAFT_VERSIONS`.
+Those paths are references for backend authors; project addons do not need to be
+copied into the installed package.
 
 Only `addon.py` is discovered automatically. Any sibling files are yours to import from `addon.py`.
 
@@ -67,7 +64,7 @@ and then reads these module attributes:
 - `ADDON_NAME`
 - optional `ADDON_PRIORITY`
 
-The current discovery logic is implemented in [addons.py](c:\Users\The DJ Himself\Documents\projects - alhazbean\fabricpy\fabricpy\addons.py).
+The current discovery logic is implemented in [addons.py](../fabricpy/addons.py).
 
 If multiple addons target the same:
 
@@ -172,8 +169,8 @@ Your addon must write a real buildable project, including:
 
 For reference, see:
 
-- [fabric_gen.py](c:\Users\The DJ Himself\Documents\projects - alhazbean\fabricpy\fabricpy\compiler\fabric_gen.py)
-- [forge_gen.py](c:\Users\The DJ Himself\Documents\projects - alhazbean\fabricpy\fabricpy\compiler\forge_gen.py)
+- [fabric_gen.py](../fabricpy/compiler/fabric_gen.py)
+- [forge_gen.py](../fabricpy/compiler/forge_gen.py)
 
 ### 2. Metadata generation
 
@@ -199,7 +196,7 @@ That means your loader addon needs mappings for things like:
 
 The existing maps live in:
 
-- [api_maps.py](c:\Users\The DJ Himself\Documents\projects - alhazbean\fabricpy\fabricpy\compiler\api_maps.py)
+- [api_maps.py](../fabricpy/compiler/api_maps.py)
 
 Important pieces there:
 
@@ -228,7 +225,7 @@ becomes a loader-specific Java call because the transpiler finds a string templa
 
 The transpiler entrypoint is in:
 
-- [transpiler.py](c:\Users\The DJ Himself\Documents\projects - alhazbean\fabricpy\fabricpy\compiler\transpiler.py)
+- [transpiler.py](../fabricpy/compiler/transpiler.py)
 
 That means if your loader uses different Java types or helper methods, your addon has to expose a compatible API map or generator strategy.
 
@@ -245,7 +242,7 @@ Your addon has to decide:
 
 Examples of those decisions are in the built-in event maps:
 
-- [api_maps.py](c:\Users\The DJ Himself\Documents\projects - alhazbean\fabricpy\fabricpy\compiler\api_maps.py)
+- [api_maps.py](../fabricpy/compiler/api_maps.py)
 
 If your loader does not have a direct equivalent for some built-in event, you have to:
 
@@ -426,3 +423,43 @@ The current built-in loader addons are:
 - NeoForge `1.21.1`
 
 They live in the same folder structure external addons use, so they are the reference implementation for addon authors.
+
+## Project and external addon roots
+
+Backends no longer need to be installed inside the FabricPy package. Discovery
+also searches `fabricpy_addons/` in the current mod project and roots from the
+`FABRICPY_ADDON_PATH` environment variable (using the platform path separator).
+A typical layout is:
+
+```text
+fabricpy_addons/
+  custom_loader/
+    addon.py
+    generator.py
+```
+
+`addon.py` can use `from .generator import generate_project`. Addon load failures
+emit warnings naming the broken file. Selection still uses declared priority;
+project addons with the default priority override the lower-priority builtins.
+
+Any loader can define `ADDON_TARGET`; the compiler resolves it from installed
+addons, not a fixed allowlist. Implement `build_project` when your loader does
+not use Gradle. The custom builder receives the generated project directory,
+Minecraft version, clean flag and output directory and must return a success
+boolean. `mod.generate()` lets you inspect a backend without running its builder.
+
+An addon with a custom `build_project` owns its dependency resolution too. If it
+needs an earlier resolution phase before final Python translation, it can provide
+`prepare_dependencies(project_dir, minecraft_version) -> bool`. The compiler
+regenerates the project after this hook succeeds. Backends using the default
+builder use the shared Gradle classpath resolver. A non-Gradle backend is never
+forced through Gradle merely because it writes dependency metadata.
+
+The compiler invokes dependency preparation when a generated
+`.fabricpy_meta/interop_project.json` declares dependencies (or GeckoLib dependency
+lines). A custom backend that needs this phase should write that metadata during
+`generate_project`, using
+`fabricpy.compiler.symbol_index.write_interop_metadata(mod, project_dir, loader,
+repositories, dependency_lines)`. It can then implement `prepare_dependencies`
+to resolve its own artifacts before regeneration. Without such metadata, dependency
+preparation is left to its custom builder. This hook is not run by `generate`.

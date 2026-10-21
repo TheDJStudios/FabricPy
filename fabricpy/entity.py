@@ -12,6 +12,9 @@ class EntityMeta(type):
     def __new__(mcs, name, bases, namespace):
         cls = super().__new__(mcs, name, bases, namespace)
         hooks = {}
+        for base in reversed(cls.__mro__[1:]):
+            hooks.update(getattr(base, "_hooks", {}))
+        hooks = {kind: hook for kind, hook in hooks.items() if hook.__name__ not in namespace}
         for _, val in namespace.items():
             if callable(val) and hasattr(val, "_fabricpy_hook"):
                 hooks[val._fabricpy_hook] = val

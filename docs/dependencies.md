@@ -112,3 +112,36 @@ So the correct way to think about the current state is:
 - real dependency path resolution: yes
 - constructor/static-call assistance: yes
 - typed safe general Java frontend: not yet
+
+## Local JARs and first-build scanning
+
+```python
+mod.dependency(path="libs/helper.jar", mod_id="helper", loader="all")
+```
+
+Specify exactly one of `coordinate` and `path`. Paths are resolved when declaring
+the dependency, must name an existing JAR, and are emitted as Gradle `files(...)`
+dependencies. Local JARs are not passed to Forge's Maven `fg.deobf` helper.
+The loader backend handles classpath configuration; production JARs using
+obfuscated Minecraft names may need a remapped development artifact.
+
+Generation scans available local/cached JARs without Gradle. A build resolves
+`compileClasspath`, records the resolved artifacts, then regenerates Java using
+the refreshed index **before Java compilation**. This allows scanned constructors
+to work on the first build. A custom loader addon can provide its own build step
+and metadata instead of using this Gradle path.
+
+The scanner honors `GRADLE_USER_HOME`, selects Maven classifiers explicitly,
+reports corrupt/unreadable JARs and missing `javap` output, and clears stale stub
+packages. `symbol_index.json` contains `diagnostics` and `unresolved_dependencies`;
+`status="complete"` means the requested scan finished without these diagnostics,
+not that type-safe Java interop is guaranteed. Name collisions between dependency
+aliases produce an error; set different `mod_id` values for colliding artifacts.
+
+`loader="all"` and the legacy `"both"` selector include every loader. A concrete
+loader name applies only to that backend, including Quilt and NeoForge.
+
+Add `.fabricpy_build/<modid>-<loader>/.fabricpy_meta/python_stubs` to your editor's
+Python analysis search paths to browse `dep.<alias>` stubs. This is a compile-time
+namespace, not a Python runtime import package. Nested classes appear flattened
+in the discovery stubs (`Outer_Inner`); Java interop uses `Outer.Inner`.

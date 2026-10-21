@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import sys
+import warnings
 from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -31,6 +35,16 @@ class Addon:
             raise ValueError(f"Addon {self.name!r} does not define generate_project(mod, project_dir)")
         return generator(mod, project_dir)
 
+    def prepare_dependencies(self, project_dir: Path, minecraft_version: str):
+        """Backends own dependency resolution; custom builders need not use Gradle."""
+        prepare = getattr(self.module, "prepare_dependencies", None)
+        if prepare is not None:
+            return prepare(project_dir, minecraft_version)
+        if getattr(self.module, "build_project", None) is not None:
+            return True
+        from fabricpy.compiler.gradle_runner import resolve_project_dependencies
+        return resolve_project_dependencies(project_dir, minecraft_version, self.target)
+
     def build_project(self, project_dir: Path, minecraft_version: str, clean: bool = False, output_dir: Path | None = None):
         builder: Callable | None = getattr(self.module, "build_project", None)
         if builder is not None:
@@ -45,12 +59,17 @@ def _addons_root() -> Path:
 
 
 def _load_module(module_path: Path) -> ModuleType:
-    module_name = "fabricpy_dynamic_" + "_".join(module_path.parts[-6:]).replace(".", "_").replace("-", "_")
-    spec = spec_from_file_location(module_name, module_path)
+    module_name = "fabricpy_dynamic_" + hashlib.sha256(str(module_path.resolve()).encode()).hexdigest()[:16]
+    spec = spec_from_file_location(module_name, module_path, submodule_search_locations=[str(module_path.parent)])
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load addon module from {module_path}")
     module = module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
     return module
 
 
@@ -84,16 +103,16 @@ def _addons_from_module(module: ModuleType, module_path: Path) -> list[Addon]:
 
 
 def discover_addons() -> list[Addon]:
-    root = _addons_root()
-    if not root.exists():
-        return []
-
+    roots = [_addons_root(), Path.cwd() / "fabricpy_addons"]
+    roots.extend(Path(value).expanduser() for value in os.environ.get("FABRICPY_ADDON_PATH", "").split(os.pathsep) if value)
+    paths = sorted({p.resolve() for root in roots if root.exists() for p in root.rglob("addon.py")})
     found: list[Addon] = []
-    for module_path in root.rglob("addon.py"):
+    for module_path in paths:
         try:
             module = _load_module(module_path)
             found.extend(_addons_from_module(module, module_path))
-        except Exception:
+        except Exception as exc:
+            warnings.warn(f"Cannot load FabricPy addon {module_path}: {exc}", RuntimeWarning, stacklevel=2)
             continue
 
     found.sort(key=lambda addon: (addon.kind, addon.target, addon.minecraft_version, addon.priority, addon.name))

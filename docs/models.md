@@ -126,3 +126,36 @@ Model-derived shapes:
 - set `model_collision = True` on the block to use the model cuboids for collision
 - outline shape also follows those cuboids when the generator can read them
 - advanced per-element model rotations are not converted into voxel math yet
+
+## Direct Blockbench input
+
+```python
+@mod.register
+class Table(mc.Block):
+    block_id = "table"
+    model = "models/table.bbmodel"
+    model_collision = True
+```
+
+Items and `Block.item_model` accept the same file input. A relative file path is
+resolved from the project working directory (the CLI uses the Python source file's
+directory). Resource-style paths such as `"machines/table.bbmodel"` are looked up
+under `assets/<modid>/models/block/` or `models/item/` as appropriate.
+
+Conversion preserves cuboids, visible faces, texture assignments, display
+transforms, UV scaling and vanilla single-axis rotations. Embedded PNGs and linked
+PNG files are copied into the generated textures. Missing linked textures produce
+a filename-specific error; embed textures in Blockbench to make projects portable.
+Blockbench 5 stores group data separately from the outliner; this is supported in
+the geo converter as well as older inline groups. The upstream format notes are at
+[Blockbench's format documentation](https://blockbench.net/wiki/docs/bbmodel/).
+
+Static Minecraft models cannot represent meshes, animated bones, rotated groups,
+or arbitrary cube rotations. These inputs raise an error instead of silently
+losing geometry. Use the existing GeckoLib `geo_model` path for cuboid bone models;
+textures and animation JSON still need their corresponding resource fields.
+
+Files in `assets/<modid>/models/block/` and `models/item/` ending in `.bbmodel`
+are also converted automatically. A JSON file supplied at the same source path
+wins over that conversion. Dict model definitions are copied before modifications
+and can be reused between loaders.

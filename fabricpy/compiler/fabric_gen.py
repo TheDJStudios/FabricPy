@@ -30,9 +30,10 @@ if TYPE_CHECKING:
     from fabricpy.mod import Mod
 
 from fabricpy.compiler.transpiler import JavaTranspiler
+from fabricpy.compiler.dependencies import dependencies_for_loader, gradle_notation
 from fabricpy.compiler.symbol_index import write_interop_metadata
 from fabricpy.compiler.jar_scanner import build_symbol_index_for_project
-from fabricpy.compiler.bbmodel_converter import compile_bbmodels_in_assets
+from fabricpy.compiler.bbmodel_converter import compile_bbmodels_in_assets, resolve_model_input
 from fabricpy.compiler.api_maps import (
     FABRIC_API_MAP, FABRIC_EXTRA_IMPORTS,
     FABRIC_EVENT_MAP,
@@ -166,14 +167,16 @@ def _model_file_from_id(project_root: Path, default_mod_id: str, model_id: str) 
 
 def _load_block_model_data(project_root: Path, mod, block, model_id: str) -> dict | None:
     default_model_id = _normalize_block_model_id(mod.mod_id, "", block.block_id)
-    if model_id == default_model_id and isinstance(block.model, dict):
-        return block.model
+    if model_id == default_model_id and block.model is not None:
+        return resolve_model_input(block.model, mod.mod_id, "block", block.block_id)
     model_file = _model_file_from_id(project_root, mod.mod_id, model_id)
     if model_file and model_file.exists():
         try:
             return json.loads(model_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return None
+    if model_file and model_file.with_suffix(".bbmodel").exists():
+        return resolve_model_input(model_file.with_suffix(".bbmodel"), mod.mod_id, "block", block.block_id)
     return None
 
 
@@ -419,34 +422,33 @@ def _keybind_code_expr(keybind) -> str:
 
 
 def _deps_for_loader(mod: "Mod", loader_name: str) -> list:
-    allowed = {loader_name, "both", "all", ""}
-    return [dep for dep in mod._dependencies if dep.loader in allowed]
+    return dependencies_for_loader(mod, loader_name)
 
 
 def _fabric_dependency_scope(dep) -> str:
     return dep.scope or "modImplementation"
 
 
-def _fabric_repository_lines(mod: "Mod") -> list[str]:
+def _fabric_repository_lines(mod: "Mod", loader_name: str = "fabric") -> list[str]:
     repos = []
     seen = set()
-    for dep in _deps_for_loader(mod, "fabric"):
+    for dep in _deps_for_loader(mod, loader_name):
         if dep.repo and dep.repo not in seen:
             repos.append(f'    maven {{ url = "{dep.repo}" }}')
             seen.add(dep.repo)
     return repos
 
 
-def _fabric_dependency_lines(mod: "Mod") -> list[str]:
+def _fabric_dependency_lines(mod: "Mod", loader_name: str = "fabric") -> list[str]:
     lines = []
-    for dep in _deps_for_loader(mod, "fabric"):
-        lines.append(f'    {_fabric_dependency_scope(dep)} "{dep.coordinate}"')
+    for dep in _deps_for_loader(mod, loader_name):
+        lines.append(f'    {_fabric_dependency_scope(dep)} {gradle_notation(dep)}')
     return lines
 
 
-def _fabric_manifest_dependencies(mod: "Mod") -> list[dict]:
+def _fabric_manifest_dependencies(mod: "Mod", loader_name: str = "fabric") -> list[dict]:
     deps = []
-    for dep in _deps_for_loader(mod, "fabric"):
+    for dep in _deps_for_loader(mod, loader_name):
         if dep.mod_id and dep.required:
             deps.append({
                 "mod_id": dep.mod_id,
@@ -470,7 +472,7 @@ def _fabric_spawn_group(group: str) -> str:
     return mapping.get(group, "SpawnGroup.MISC")
 
 
-def generate_fabric_project(mod: "Mod", project_dir: Path):
+def generate_fabric_project(mod: "Mod", project_dir: Path, *, loader_name: str = "fabric"):
     """Generate a complete Fabric mod project tree under project_dir."""
     pkg = mod.package
     pkg_path = pkg.replace(".", "/")
@@ -486,8 +488,8 @@ def generate_fabric_project(mod: "Mod", project_dir: Path):
     java_root.mkdir(parents=True, exist_ok=True)
     res_root.mkdir(parents=True, exist_ok=True)
 
-    interop_repositories = ["https://maven.fabricmc.net/", *_fabric_repository_lines(mod), "https://repo1.maven.org/maven2/"]
-    interop_dependency_lines = _fabric_dependency_lines(mod)
+    interop_repositories = ["https://maven.fabricmc.net/", *_fabric_repository_lines(mod, loader_name), "https://repo1.maven.org/maven2/"]
+    interop_dependency_lines = _fabric_dependency_lines(mod, loader_name)
     if _uses_geckolib(mod):
         version_meta = FABRIC_VERSIONS.get(mod.minecraft_version)
         if version_meta is None:
@@ -500,15 +502,15 @@ def generate_fabric_project(mod: "Mod", project_dir: Path):
     write_interop_metadata(
         mod,
         project_dir,
-        "fabric",
+        loader_name,
         repositories=interop_repositories,
         dependency_lines=interop_dependency_lines,
-        manifest_dependencies=_fabric_manifest_dependencies(mod),
+        manifest_dependencies=_fabric_manifest_dependencies(mod, loader_name),
     )
     try:
         build_symbol_index_for_project(project_dir)
-    except Exception:
-        pass
+    except Exception as exc:
+        raise ValueError(f"Dependency scanning failed for {loader_name}: {exc}") from exc
 
     transpiler = JavaTranspiler(
         _fabric_api_map_for_project(mod.minecraft_version, pkg),
@@ -533,8 +535,8 @@ def generate_fabric_project(mod: "Mod", project_dir: Path):
     _write_events(mod, java_root, pkg, transpiler)
     _write_commands(mod, java_root, pkg, transpiler)
     _write_mixins(mod, java_root, pkg, transpiler)
-    _write_resources(mod, res_root, pkg)
-    _write_gradle_files(mod, project_dir)
+    _write_resources(mod, res_root, pkg, loader_name)
+    _write_gradle_files(mod, project_dir, loader_name)
     print(f"[fabricpy] Fabric project generated at {project_dir}")
 
 
@@ -2493,7 +2495,7 @@ public class {cn} {{
 # Resources
 # ─────────────────────────────────────────────────────────────────────────── #
 
-def _write_resources(mod: "Mod", res_root: Path, pkg: str):
+def _write_resources(mod: "Mod", res_root: Path, pkg: str, loader_name: str = "fabric"):
     main_class = f"{pkg}.{to_pascal(mod.mod_id)}"
 
     # fabric.mod.json
@@ -2515,7 +2517,7 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str):
             "java": f">={FABRIC_VERSIONS[mod.minecraft_version].java}",
         },
     }
-    for dep in _deps_for_loader(mod, "fabric"):
+    for dep in _deps_for_loader(mod, loader_name):
         if dep.mod_id and dep.required:
             fabric_mod["depends"][dep.mod_id] = dep.version_range or "*"
     if _blocks_requiring_cutout(mod) or mod._keybinds or mod._packets:
@@ -2557,10 +2559,8 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str):
         display = advancement["data"].get("display", {})
         if isinstance(display.get("title"), str):
             lang[f"advancement.{mod.mod_id}.{advancement_key}.title"] = display["title"]
-            display["title"] = {"translate": f"advancement.{mod.mod_id}.{advancement_key}.title"}
         if isinstance(display.get("description"), str):
             lang[f"advancement.{mod.mod_id}.{advancement_key}.description"] = display["description"]
-            display["description"] = {"translate": f"advancement.{mod.mod_id}.{advancement_key}.description"}
     for sound in mod._sounds:
         if sound.get("subtitle_text"):
             key = f"subtitles.{mod.mod_id}.{sound['id'].replace('/', '.')}"
@@ -2588,13 +2588,13 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str):
                 }
             })
         )
-        block_model = block.model or {
+        block_model = resolve_model_input(block.model, mod.mod_id, "block", block.block_id, res_root / "assets" / mod.mod_id) or {
             "parent": "minecraft:block/cube_all",
             "textures": block.textures or {
                 "all": _resource_ref(mod.mod_id, block.texture, "block", block.block_id)
             }
         }
-        block_item_model = block.item_model or {
+        block_item_model = resolve_model_input(block.item_model, mod.mod_id, "item", block.block_id, res_root / "assets" / mod.mod_id) or {
             "parent": f"{mod.mod_id}:block/{block.block_id}"
         }
         emissive_ref = _resource_ref(mod.mod_id, block.emissive_texture, "block", f"{block.block_id}_emissive")
@@ -2603,7 +2603,7 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str):
             base_overlay_model = _load_block_model_data(Path.cwd(), mod, block, default_model_id)
             if not isinstance(base_overlay_model, dict):
                 base_overlay_model = block_model
-            overlay_model = block.emissive_model or json.loads(json.dumps(base_overlay_model))
+            overlay_model = resolve_model_input(block.emissive_model, mod.mod_id, "block", block.block_id + "__emissive", res_root / "assets" / mod.mod_id) or json.loads(json.dumps(base_overlay_model))
             if isinstance(overlay_model, dict):
                 base_textures = base_overlay_model.get("textures", {}) if isinstance(base_overlay_model, dict) else {}
                 overlay_model["ambientocclusion"] = False
@@ -2631,7 +2631,7 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str):
         )
 
     for item in mod._items:
-        item_model = item.model or {
+        item_model = resolve_model_input(item.model, mod.mod_id, "item", item.item_id, res_root / "assets" / mod.mod_id) or {
             "parent": "minecraft:item/generated",
             "textures": item.textures or {
                 "layer0": _resource_ref(mod.mod_id, item.texture, "item", item.item_id)
@@ -2698,7 +2698,7 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str):
     project_root = Path.cwd()
     _copy_tree_if_exists(project_root / "assets" / mod.mod_id, res_root / "assets" / mod.mod_id)
     _copy_tree_if_exists(project_root / "data" / mod.mod_id, res_root / "data" / mod.mod_id)
-    compile_bbmodels_in_assets(res_root / "assets" / mod.mod_id, mod.mod_id)
+    compile_bbmodels_in_assets(res_root / "assets" / mod.mod_id, mod.mod_id, project_root / "assets" / mod.mod_id)
 
     # pack.mcmeta
     _write_text(res_root / "pack.mcmeta", json.dumps({
@@ -2713,15 +2713,15 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str):
 # Gradle build files
 # ─────────────────────────────────────────────────────────────────────────── #
 
-def _write_gradle_files(mod: "Mod", project_dir: Path):
+def _write_gradle_files(mod: "Mod", project_dir: Path, loader_name: str = "fabric"):
     mc = mod.minecraft_version
     use_geckolib = _uses_geckolib(mod)
     v = FABRIC_VERSIONS.get(mc)
     if v is None:
         raise ValueError(f"Fabric does not support minecraft_version={mc!r} in this generator.")
     main_class = to_pascal(mod.mod_id)
-    extra_repos = _fabric_repository_lines(mod)
-    extra_deps = _fabric_dependency_lines(mod)
+    extra_repos = _fabric_repository_lines(mod, loader_name)
+    extra_deps = _fabric_dependency_lines(mod, loader_name)
 
     # build.gradle
     build_gradle = f"""\

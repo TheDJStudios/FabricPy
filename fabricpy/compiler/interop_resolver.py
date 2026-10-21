@@ -25,6 +25,7 @@ class InteropResolver:
     def __init__(self):
         self.class_index: dict[str, dict] = {}
         self.class_by_alias: dict[str, set[str]] = {}
+        self.details_by_alias: dict[str, dict[str, dict]] = {}
 
     @classmethod
     def from_index(cls, index_path: Path | None) -> "InteropResolver":
@@ -43,6 +44,7 @@ class InteropResolver:
                 continue
 
             alias_set = resolver.class_by_alias.setdefault(alias, set())
+            resolver.details_by_alias.setdefault(alias, {}).update(class_details)
             for class_name, detail in class_details.items():
                 resolver.class_index[class_name] = detail
                 alias_set.add(class_name)
@@ -74,7 +76,7 @@ class InteropResolver:
             if class_candidate not in known_classes:
                 continue
 
-            detail = self.class_index.get(class_candidate, {})
+            detail = self.details_by_alias.get(alias, {}).get(class_candidate, {})
             remainder = java_parts[size:]
             if not remainder:
                 return class_candidate
@@ -107,7 +109,7 @@ class InteropResolver:
             if class_candidate not in known_classes:
                 continue
 
-            detail = self.class_index.get(class_candidate, {})
+            detail = self.details_by_alias.get(alias, {}).get(class_candidate, {})
             remainder = java_parts[size:]
             if not remainder:
                 matched_ctor = self._match_method(detail, "__init__", arg_count, constructor=True)
@@ -173,7 +175,9 @@ class InteropResolver:
         for method in detail.get("methods", []):
             if method.get("name") != member_name:
                 continue
-            if method.get("arg_count") != arg_count:
+            params = method.get("arg_types", [])
+            varargs = bool(params and params[-1].endswith("..."))
+            if (varargs and arg_count < len(params) - 1) or (not varargs and method.get("arg_count") != arg_count):
                 continue
             if constructor and not method.get("constructor"):
                 continue

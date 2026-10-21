@@ -12,7 +12,7 @@ def generate_quilt_project(mod, project_dir: Path):
     if version_meta is None:
         raise ValueError(f"Quilt does not support minecraft_version={mod.minecraft_version!r} in this generator.")
 
-    generate_fabric_project(mod, project_dir)
+    generate_fabric_project(mod, project_dir, loader_name="quilt")
     _rewrite_fabric_mod_json(mod, project_dir, version_meta)
     _write_quilt_gradle_files(mod, project_dir, version_meta)
     print(f"[fabricpy] Quilt project generated at {project_dir}")
@@ -32,8 +32,8 @@ def _rewrite_fabric_mod_json(mod, project_dir: Path, version_meta):
 def _write_quilt_gradle_files(mod, project_dir: Path, version_meta):
     mc = mod.minecraft_version
     use_geckolib = _uses_geckolib(mod)
-    extra_repos = _fabric_repository_lines(mod)
-    extra_deps = _fabric_dependency_lines(mod)
+    extra_repos = _fabric_repository_lines(mod, "quilt")
+    extra_deps = _fabric_dependency_lines(mod, "quilt")
     geckolib_line = (
         f'modImplementation "software.bernie.geckolib:geckolib-fabric-{mc}:{version_meta.geckolib}"'
         if use_geckolib

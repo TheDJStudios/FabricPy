@@ -11,16 +11,22 @@ Supports a practical subset of Python that covers most modding use cases:
   - Return statements
   - Pass (skipped)
 
-Anything not recognised gets emitted as a TODO comment so compilation
-still succeeds and you can fill it in manually.
+Unsupported Python raises TranspileError with the source line so a build
+cannot silently discard behavior.
 """
 
 import ast
+import json
+import string
 import textwrap
 from pathlib import Path
 from typing import Optional
 
 from fabricpy.compiler.interop_resolver import InteropResolver
+
+
+class TranspileError(ValueError):
+    """Python that cannot be translated without changing its meaning."""
 
 
 class JavaTranspiler:
@@ -48,7 +54,7 @@ class JavaTranspiler:
         try:
             tree = ast.parse(src)
         except SyntaxError as e:
-            return f"    // Python SyntaxError: {e}"
+            raise TranspileError(f"Invalid Python callback: {e}") from e
 
         func_node = None
         for node in ast.walk(tree):
@@ -57,9 +63,11 @@ class JavaTranspiler:
                 break
 
         if func_node is None:
-            return "    // Could not find function definition to transpile"
+            raise TranspileError("Expected a Python function definition")
 
         self._lines = []
+        self._variables = {}
+        self._string_variables = set()
         self._interop_notes = []
         self._depth = 1  # inside a Java method body = 1 indent level
 
@@ -78,26 +86,31 @@ class JavaTranspiler:
 
     def _stmt(self, node: ast.AST):
         if isinstance(node, ast.Expr):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                return  # docstring
             expr = self._expr(node.value)
             if expr:
                 self._emit(f"{expr};")
 
         elif isinstance(node, ast.Assign):
-            targets = ", ".join(self._expr(t) for t in node.targets)
-            value = self._expr(node.value)
-            self._emit(f"var {targets} = {value};")
+            if len(node.targets) != 1:
+                raise TranspileError(f"Line {node.lineno}: chained assignment is unsupported; split it into separate assignments")
+            self._assign(node.targets[0], node.value)
 
         elif isinstance(node, ast.AugAssign):
             target = self._expr(node.target)
-            op = self._binop(node.op)
             value = self._expr(node.value)
-            self._emit(f"{target} {op}= {value};")
+            if isinstance(node.op, ast.FloorDiv):
+                self._emit(f"{target} = Math.floorDiv({target}, {value});")
+            elif isinstance(node.op, ast.Div):
+                raise TranspileError(f"Line {node.lineno}: /= may change the inferred Java type; assign a division result to a new variable")
+            else:
+                op = self._binop(node.op)
+                self._emit(f"{target} {op}= {value};")
 
         elif isinstance(node, ast.AnnAssign):
             if node.value:
-                target = self._expr(node.target)
-                value = self._expr(node.value)
-                self._emit(f"var {target} = {value};")
+                self._assign(node.target, node.value)
 
         elif isinstance(node, ast.Return):
             if node.value:
@@ -112,6 +125,8 @@ class JavaTranspiler:
             self._for(node)
 
         elif isinstance(node, ast.While):
+            if node.orelse:
+                raise TranspileError(f"Line {node.lineno}: while/else is unsupported")
             cond = self._expr(node.test)
             self._emit(f"while ({cond}) {{")
             self._depth += 1
@@ -130,11 +145,41 @@ class JavaTranspiler:
             self._emit("continue;")
 
         elif isinstance(node, ast.Delete):
-            # Python `del x` — skip, not meaningful in Java
-            self._emit("// del (skipped)")
+            raise TranspileError(f"Line {node.lineno}: del is unsupported")
 
         else:
-            self._emit(f"// TODO: {type(node).__name__}")
+            raise TranspileError(f"Line {getattr(node, 'lineno', '?')}: unsupported Python statement {type(node).__name__}")
+
+    def _assign(self, target, value):
+        if isinstance(target, (ast.Tuple, ast.List)):
+            raise TranspileError(f"Line {target.lineno}: unpacking assignment is unsupported")
+        name = self._expr(target)
+        prefix = ""
+        if isinstance(target, ast.Name) and name not in self._variables:
+            if isinstance(value, ast.Constant) and value.value is None:
+                raise TranspileError(f"Line {target.lineno}: cannot infer a Java type from None")
+            prefix = "var "
+            self._variables[name] = self._depth
+        is_string = self._is_string(value)
+        self._emit(f"{prefix}{name} = {self._expr(value)};")
+        if isinstance(target, ast.Name):
+            if is_string:
+                self._string_variables.add(name)
+            else:
+                self._string_variables.discard(name)
+
+    def _is_string(self, node):
+        if isinstance(node, ast.Constant):
+            return isinstance(node.value, str)
+        if isinstance(node, ast.Name):
+            return node.id in self._string_variables
+        if isinstance(node, ast.JoinedStr):
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "str":
+            return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return self._is_string(node.left) or self._is_string(node.right)
+        return False
 
     def _if(self, node: ast.If):
         cond = self._expr(node.test)
@@ -191,12 +236,17 @@ class JavaTranspiler:
             self._emit("}")
 
     def _for(self, node: ast.For):
-        # Only range() is supported
+        if node.orelse:
+            raise TranspileError(f"Line {node.lineno}: for/else is unsupported")
+        if not isinstance(node.target, ast.Name):
+            raise TranspileError(f"Line {node.lineno}: loop target must be a name")
+        # range loops and Java iterables are supported.
         if (isinstance(node.iter, ast.Call) and
                 isinstance(node.iter.func, ast.Name) and
                 node.iter.func.id == "range"):
 
             var = self._expr(node.target)
+            self._variables[var] = self._depth + 1
             args = [self._expr(a) for a in node.iter.args]
 
             if len(args) == 1:
@@ -204,7 +254,17 @@ class JavaTranspiler:
             elif len(args) == 2:
                 self._emit(f"for (int {var} = {args[0]}; {var} < {args[1]}; {var}++) {{")
             elif len(args) == 3:
-                self._emit(f"for (int {var} = {args[0]}; {var} < {args[1]}; {var} += {args[2]}) {{")
+                step_node = node.iter.args[2]
+                try:
+                    step = ast.literal_eval(step_node)
+                except (ValueError, TypeError):
+                    raise TranspileError(f"Line {node.lineno}: range step must be a nonzero integer literal")
+                if not isinstance(step, int) or isinstance(step, bool) or step == 0:
+                    raise TranspileError(f"Line {node.lineno}: range step must be a nonzero integer")
+                compare = "<" if step > 0 else ">"
+                self._emit(f"for (int {var} = {args[0]}; {var} {compare} {args[1]}; {var} += {args[2]}) {{")
+            else:
+                raise TranspileError(f"Line {node.lineno}: range expects 1 to 3 arguments")
 
             self._depth += 1
             for s in node.body:
@@ -214,6 +274,7 @@ class JavaTranspiler:
         else:
             # Best-effort: emit iterable as array-style
             var = self._expr(node.target)
+            self._variables[var] = self._depth + 1
             it = self._expr(node.iter)
             self._emit(f"for (var {var} : {it}) {{")
             self._depth += 1
@@ -257,8 +318,10 @@ class JavaTranspiler:
                 return f"-{self._expr(node.operand)}"
             elif isinstance(node.op, ast.UAdd):
                 return self._expr(node.operand)
+            elif isinstance(node.op, ast.Invert):
+                return f"~({self._expr(node.operand)})"
             else:
-                return f"/* {type(node.op).__name__} */ {self._expr(node.operand)}"
+                raise TranspileError(f"Line {node.lineno}: unsupported unary operator {type(node.op).__name__}")
 
         elif isinstance(node, ast.Compare):
             return self._compare(node)
@@ -284,7 +347,7 @@ class JavaTranspiler:
 
         elif isinstance(node, ast.Tuple) or isinstance(node, ast.List):
             elts = ", ".join(self._expr(e) for e in node.elts)
-            return f"/* [{elts}] */"
+            return f"new Object[] {{{elts}}}"
 
         elif isinstance(node, ast.NamedExpr):
             # Walrus operator :=
@@ -293,12 +356,11 @@ class JavaTranspiler:
             return f"({target} = {value})"
 
         else:
-            return f"/* TODO: {type(node).__name__} */"
+            raise TranspileError(f"Line {getattr(node, 'lineno', '?')}: unsupported Python expression {type(node).__name__}")
 
     def _const(self, node: ast.Constant) -> str:
         if isinstance(node.value, str):
-            escaped = node.value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-            return f'"{escaped}"'
+            return json.dumps(node.value, ensure_ascii=True)
         elif isinstance(node.value, bool):
             return "true" if node.value else "false"
         elif node.value is None:
@@ -312,6 +374,8 @@ class JavaTranspiler:
         # Build dotted signature for API map lookup
         sig = self._dotted(node.func)
         args = [self._expr(a) for a in node.args]
+        if any(kw.arg is None for kw in node.keywords):
+            raise TranspileError(f"Line {node.lineno}: **keyword expansion is unsupported")
         kwargs = {kw.arg: self._expr(kw.value) for kw in node.keywords if kw.arg}
 
         if isinstance(node.func, ast.Name):
@@ -323,21 +387,24 @@ class JavaTranspiler:
             if builtin == "float" and len(args) == 1:
                 return f"((float) ({args[0]}))"
             if builtin == "bool" and len(args) == 1:
-                return f"(({args[0]}) != null)"
+                raise TranspileError(f"Line {node.lineno}: bool() requires type information; use an explicit comparison")
 
         if sig in self.api_map:
             template = self.api_map[sig]
+            fields = {field for _, field, _, _ in string.Formatter().parse(template) if field is not None}
+            unused_positions = [index for index in range(len(args)) if str(index) not in fields]
+            unused_keywords = set(kwargs) - fields
+            if unused_positions or unused_keywords:
+                raise TranspileError(f"Line {node.lineno}: wrong arguments for {sig}; unexpected argument(s)")
             try:
                 return template.format(*args, **kwargs)
-            except (IndexError, KeyError):
-                # Partial template — return what we can
-                result = template
-                for i, a in enumerate(args):
-                    result = result.replace(f"{{{i}}}", a)
-                return result
+            except (IndexError, KeyError) as exc:
+                raise TranspileError(f"Line {node.lineno}: wrong arguments for {sig}") from exc
 
         interop_call = self._interop_resolver.resolve_dependency_call(sig, len(node.args))
         if interop_call:
+            if kwargs:
+                raise TranspileError(f"Line {node.lineno}: Java dependency calls require positional arguments")
             if interop_call.reason:
                 note = f"{sig} -> {interop_call.java_path}: {interop_call.reason}"
                 if note not in self._interop_notes:
@@ -367,6 +434,12 @@ class JavaTranspiler:
     def _binop_expr(self, node: ast.BinOp) -> str:
         left = self._expr(node.left)
         right = self._expr(node.right)
+        if isinstance(node.op, ast.Pow):
+            return f"Math.pow({left}, {right})"
+        if isinstance(node.op, ast.FloorDiv):
+            return f"Math.floorDiv({left}, {right})"
+        if isinstance(node.op, ast.Div):
+            return f"(((double) ({left})) / ({right}))"
         op = self._binop(node.op)
 
         # Python string concat with + → Java string concat
@@ -375,28 +448,37 @@ class JavaTranspiler:
         return f"({left} {op} {right})"
 
     def _binop(self, op: ast.operator) -> str:
-        return {
+        operators = {
             ast.Add: "+", ast.Sub: "-", ast.Mult: "*",
             ast.Div: "/", ast.Mod: "%", ast.FloorDiv: "/",
             ast.BitAnd: "&", ast.BitOr: "|", ast.BitXor: "^",
             ast.LShift: "<<", ast.RShift: ">>",
-        }.get(type(op), "?")
+        }
+        if type(op) not in operators:
+            raise TranspileError(f"Unsupported Python operator {type(op).__name__}")
+        return operators[type(op)]
 
     def _compare(self, node: ast.Compare) -> str:
         cmp_ops = {
+            ast.Is: "==", ast.IsNot: "!=",
             ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=",
             ast.Gt: ">", ast.GtE: ">=",
         }
-        left = self._expr(node.left)
+        left_node = node.left
+        left = self._expr(left_node)
         parts = []
         for op, comp in zip(node.ops, node.comparators):
-            java_op = cmp_ops.get(type(op), "==")
+            java_op = cmp_ops.get(type(op))
+            if java_op is None:
+                raise TranspileError(f"Line {node.lineno}: unsupported comparison {type(op).__name__}")
             right = self._expr(comp)
             # String equality: use .equals() for String literals
-            if isinstance(comp, ast.Constant) and isinstance(comp.value, str):
-                parts.append(f"{left}.equals({right})")
+            if isinstance(op, (ast.Eq, ast.NotEq)) and (self._is_string(left_node) or self._is_string(comp)):
+                equality = f"java.util.Objects.equals({left}, {right})"
+                parts.append(f"!{equality}" if isinstance(op, ast.NotEq) else equality)
             else:
                 parts.append(f"{left} {java_op} {right}")
+            left_node = comp
             left = self._expr(comp)
         return " && ".join(parts)
 
@@ -405,18 +487,22 @@ class JavaTranspiler:
         parts = []
         for val in node.values:
             if isinstance(val, ast.Constant):
-                text = val.value.replace('"', '\\"')
-                parts.append(f'"{text}"')
+                parts.append(json.dumps(val.value, ensure_ascii=True))
             elif isinstance(val, ast.FormattedValue):
+                if val.format_spec or val.conversion not in {-1, 115}:
+                    raise TranspileError("Formatted f-strings support plain values and !s only")
                 parts.append(f"String.valueOf({self._expr(val.value)})")
         if not parts:
             return '""'
-        return " + ".join(parts)
+        return "(" + " + ".join(parts) + ")"
 
     # ------------------------------------------------------------------ #
     # Emit helper
     # ------------------------------------------------------------------ #
 
     def _emit(self, line: str):
+        if line.startswith("}"):
+            self._variables = {name: depth for name, depth in self._variables.items() if depth <= self._depth}
+            self._string_variables.intersection_update(self._variables)
         indent = " " * (self.indent_spaces * self._depth)
         self._lines.append(indent + line)

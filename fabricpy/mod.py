@@ -28,6 +28,7 @@ Usage:
 """
 
 import inspect
+from pathlib import Path
 import re
 from typing import List, Optional, Type
 
@@ -202,7 +203,7 @@ class ScreenDefinition:
 class Dependency:
     def __init__(
         self,
-        coordinate: str,
+        coordinate: str = "",
         loader: str = "both",
         scope: str = "",
         repo: str = "",
@@ -212,9 +213,17 @@ class Dependency:
         version_range: str = "*",
         ordering: str = "NONE",
         side: str = "BOTH",
+        path: str | Path | None = None,
     ):
-        if not coordinate:
-            raise ValueError("coordinate is required")
+        if bool(coordinate) == bool(path):
+            raise ValueError("Specify exactly one dependency coordinate or path to a .jar")
+        if coordinate and not re.fullmatch(r"[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+:[A-Za-z0-9_.+\[\],()-]+(?::[A-Za-z0-9_.-]+)?(?:@[A-Za-z0-9_.-]+)?", coordinate):
+            raise ValueError("Dependency coordinate must be group:artifact:version[:classifier][@extension]")
+        self.path = Path(path).expanduser().resolve() if path else None
+        if self.path and (self.path.suffix.lower() != ".jar" or not self.path.is_file()):
+            raise ValueError(f"Dependency JAR does not exist: {self.path}")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", scope or "implementation"):
+            raise ValueError(f"Invalid dependency scope: {scope!r}")
         self.coordinate = coordinate
         self.loader = loader.lower().strip()
         self.scope = scope.strip()
@@ -309,6 +318,8 @@ class Mod:
         from fabricpy.entity import Entity
         from fabricpy.mixin import Mixin
 
+        if not isinstance(cls, type):
+            raise TypeError("mod.register expects a Block, Item, Entity, or Mixin class")
         if isinstance(cls, type):
             if issubclass(cls, Block) and cls is not Block:
                 cls.namespace = self.mod_id
@@ -550,7 +561,7 @@ class Mod:
 
     def dependency(
         self,
-        coordinate: str,
+        coordinate: str = "",
         loader: str = "both",
         scope: str = "",
         repo: str = "",
@@ -560,9 +571,11 @@ class Mod:
         version_range: str = "*",
         ordering: str = "NONE",
         side: str = "BOTH",
+        path: str | Path | None = None,
     ):
         dep = Dependency(
             coordinate=coordinate,
+            path=path,
             loader=loader,
             scope=scope,
             repo=repo,
@@ -722,6 +735,11 @@ class Mod:
     # Compile
     # ------------------------------------------------------------------ #
 
+    def generate(self):
+        """Generate loader projects without running Gradle; return paths by loader."""
+        from fabricpy.compiler import compile_mod
+        return compile_mod(self, generate_only=True)
+
     def compile(self, output_dir: str = "./dist", clean: bool = False):
         """
         Compile this mod into a .jar file.
@@ -734,7 +752,7 @@ class Mod:
             clean:      If True, runs `gradlew clean build` instead of just `gradlew build`
         """
         from fabricpy.compiler import compile_mod
-        compile_mod(self, output_dir=output_dir, clean=clean)
+        return compile_mod(self, output_dir=output_dir, clean=clean)
 
     # ------------------------------------------------------------------ #
     # Repr

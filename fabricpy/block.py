@@ -51,6 +51,9 @@ class BlockMeta(type):
     def __new__(mcs, name, bases, namespace):
         cls = super().__new__(mcs, name, bases, namespace)
         hooks = {}
+        for base in reversed(cls.__mro__[1:]):
+            hooks.update(getattr(base, "_hooks", {}))
+        hooks = {kind: hook for kind, hook in hooks.items() if hook.__name__ not in namespace}
         for attr_name, val in namespace.items():
             if callable(val) and hasattr(val, "_fabricpy_hook"):
                 hooks[val._fabricpy_hook] = val
@@ -104,12 +107,12 @@ class Block(metaclass=BlockMeta):
     emissive_level: int = 0             # 1-255 authoring value, mapped to block light/render hints
     textures: dict = {}                 # Full block model texture map override
     emissive_textures: dict = {}        # Full emissive overlay texture map override
-    model: dict | None = None           # Full block model JSON override
-    emissive_model: dict | None = None  # Full emissive overlay block model JSON override
+    model: dict | str | None = None           # Full block model JSON override
+    emissive_model: dict | str | None = None  # Full emissive overlay block model JSON override
     wall_model: str = ""                # Optional model id/path override for wall rotation variants
     floor_model: str = ""               # Optional model id/path override for floor rotation variants
     blockstate: dict | None = None      # Full blockstate JSON override
-    item_model: dict | None = None      # Full block item model JSON override
+    item_model: dict | str | None = None      # Full block item model JSON override
 
     # ---- Internal ----
     _hooks: dict = {}  # populated by BlockMeta

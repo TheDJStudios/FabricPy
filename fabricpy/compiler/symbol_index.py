@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from fabricpy.compiler.dependencies import dependencies_for_loader
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,10 +26,8 @@ def _interop_roots(mod: "Mod", loader: str) -> list[dict]:
         {"root": "loader", "kind": "loader_api", "loader": loader},
         {"root": f"mod.{mod.mod_id}", "kind": "generated_mod", "loader": loader},
     ]
-    for dep in mod._dependencies:
+    for dep in dependencies_for_loader(mod, loader):
         dep_loader = _normalize_dep_loader(dep.loader)
-        if dep_loader not in {loader, "both", "all", ""}:
-            continue
         if dep.mod_id:
             roots.append({
                 "root": f"dep.{dep.mod_id}",
@@ -42,12 +41,11 @@ def _interop_roots(mod: "Mod", loader: str) -> list[dict]:
 
 def _dependency_entries(mod: "Mod", loader: str) -> list[dict]:
     entries = []
-    for dep in mod._dependencies:
+    for dep in dependencies_for_loader(mod, loader):
         dep_loader = _normalize_dep_loader(dep.loader)
-        if dep_loader not in {loader, "both", "all", ""}:
-            continue
         entries.append({
             "coordinate": dep.coordinate,
+            "path": str(dep.path) if dep.path else "",
             "loader": dep_loader or "both",
             "scope": dep.scope or "",
             "repo": dep.repo or "",
@@ -134,5 +132,13 @@ def write_interop_metadata(
         ],
     }
 
-    (meta_dir / "interop_project.json").write_text(json.dumps(project_meta, indent=2), encoding="utf-8")
+    project_meta_path = meta_dir / "interop_project.json"
+    try:
+        previous_meta = json.loads(project_meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous_meta = {}
+    resolution_keys = ("loader", "minecraft_version", "dependencies", "dependency_lines", "repositories")
+    if any(previous_meta.get(key) != project_meta.get(key) for key in resolution_keys):
+        (meta_dir / "resolved_dependencies.json").unlink(missing_ok=True)
+    project_meta_path.write_text(json.dumps(project_meta, indent=2), encoding="utf-8")
     (meta_dir / "symbol_index.stub.json").write_text(json.dumps(symbol_index_stub, indent=2), encoding="utf-8")

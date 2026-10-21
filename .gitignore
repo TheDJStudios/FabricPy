@@ -8,3 +8,14 @@ dist/playtime-forge-1.0.jar
 dist/playtime-1.0.jar
 /pickle
 /fabricpy/__pycache__
+
+# Python and local build caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.gradle/
+/.fabricpy_meta/
+/build/
+
+/dist/pypi/

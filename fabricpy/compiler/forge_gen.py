@@ -29,9 +29,10 @@ if TYPE_CHECKING:
     from fabricpy.mod import Mod
 
 from fabricpy.compiler.transpiler import JavaTranspiler
+from fabricpy.compiler.dependencies import dependencies_for_loader, gradle_notation
 from fabricpy.compiler.symbol_index import write_interop_metadata
 from fabricpy.compiler.jar_scanner import build_symbol_index_for_project
-from fabricpy.compiler.bbmodel_converter import compile_bbmodels_in_assets
+from fabricpy.compiler.bbmodel_converter import compile_bbmodels_in_assets, resolve_model_input
 from fabricpy.compiler.api_maps import (
     FORGE_API_MAP, FORGE_EXTRA_IMPORTS,
     FORGE_EVENT_MAP,
@@ -165,14 +166,16 @@ def _model_file_from_id(project_root: Path, default_mod_id: str, model_id: str) 
 
 def _load_block_model_data(project_root: Path, mod, block, model_id: str) -> dict | None:
     default_model_id = _normalize_block_model_id(mod.mod_id, "", block.block_id)
-    if model_id == default_model_id and isinstance(block.model, dict):
-        return block.model
+    if model_id == default_model_id and block.model is not None:
+        return resolve_model_input(block.model, mod.mod_id, "block", block.block_id)
     model_file = _model_file_from_id(project_root, mod.mod_id, model_id)
     if model_file and model_file.exists():
         try:
             return json.loads(model_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return None
+    if model_file and model_file.with_suffix(".bbmodel").exists():
+        return resolve_model_input(model_file.with_suffix(".bbmodel"), mod.mod_id, "block", block.block_id)
     return None
 
 
@@ -402,30 +405,29 @@ def _keybind_code_expr(keybind) -> str:
 
 
 def _deps_for_loader(mod: "Mod", loader_name: str) -> list:
-    allowed = {loader_name, "both", "all", ""}
-    return [dep for dep in mod._dependencies if dep.loader in allowed]
+    return dependencies_for_loader(mod, loader_name)
 
 
-def _forge_repository_lines(mod: "Mod") -> list[str]:
+def _forge_repository_lines(mod: "Mod", loader_name: str = "forge") -> list[str]:
     repos = []
     seen = set()
-    for dep in _deps_for_loader(mod, "forge"):
+    for dep in _deps_for_loader(mod, loader_name):
         if dep.repo and dep.repo not in seen:
             repos.append(f"    maven {{ url = '{dep.repo}' }}")
             seen.add(dep.repo)
     return repos
 
 
-def _forge_dependency_line(dep, mc: str) -> str:
+def _forge_dependency_line(dep, mc: str, loader_name: str = "forge") -> str:
     scope = dep.scope or "implementation"
-    if dep.deobf:
-        return f"    {scope} fg.deobf('{dep.coordinate}')"
-    return f"    {scope} '{dep.coordinate}'"
+    if dep.deobf and not dep.path and loader_name != "neoforge":
+        return f"    {scope} fg.deobf({gradle_notation(dep)})"
+    return f"    {scope} {gradle_notation(dep)}"
 
 
-def _forge_manifest_dependencies(mod: "Mod") -> list[dict]:
+def _forge_manifest_dependencies(mod: "Mod", loader_name: str = "forge") -> list[dict]:
     deps = []
-    for dep in _deps_for_loader(mod, "forge"):
+    for dep in _deps_for_loader(mod, loader_name):
         if dep.mod_id and dep.required:
             deps.append({
                 "mod_id": dep.mod_id,
@@ -451,7 +453,7 @@ def _mob_category(group: str) -> str:
     return mapping.get(group, "MobCategory.MISC")
 
 
-def generate_forge_project(mod: "Mod", project_dir: Path):
+def generate_forge_project(mod: "Mod", project_dir: Path, *, loader_name: str = "forge"):
     """Generate a complete Forge mod project tree under project_dir."""
     pkg = mod.package
     pkg_path = pkg.replace(".", "/")
@@ -467,29 +469,29 @@ def generate_forge_project(mod: "Mod", project_dir: Path):
     java_root.mkdir(parents=True, exist_ok=True)
     res_root.mkdir(parents=True, exist_ok=True)
 
-    interop_repositories = [*_forge_repository_lines(mod), "https://repo1.maven.org/maven2/"]
-    interop_dependency_lines = [_forge_dependency_line(dep, mod.minecraft_version) for dep in _deps_for_loader(mod, "forge")]
+    interop_repositories = [*_forge_repository_lines(mod, loader_name), "https://repo1.maven.org/maven2/"]
+    interop_dependency_lines = [_forge_dependency_line(dep, mod.minecraft_version, loader_name) for dep in _deps_for_loader(mod, loader_name)]
     if _uses_geckolib(mod):
         version_meta = FORGE_VERSIONS.get(mod.minecraft_version)
         if version_meta is None:
             raise ValueError(f"Forge does not support minecraft_version={mod.minecraft_version!r} in this generator.")
         interop_repositories.insert(0, "https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/")
         interop_dependency_lines = [
-            f"implementation fg.deobf('software.bernie.geckolib:geckolib-forge-{mod.minecraft_version}:{version_meta.geckolib}')",
+            (f"implementation 'software.bernie.geckolib:geckolib-neoforge-{mod.minecraft_version}:{version_meta.geckolib}'" if loader_name == "neoforge" else f"implementation fg.deobf('software.bernie.geckolib:geckolib-forge-{mod.minecraft_version}:{version_meta.geckolib}')"),
             *interop_dependency_lines,
         ]
     write_interop_metadata(
         mod,
         project_dir,
-        "forge",
+        loader_name,
         repositories=interop_repositories,
         dependency_lines=interop_dependency_lines,
-        manifest_dependencies=_forge_manifest_dependencies(mod),
+        manifest_dependencies=_forge_manifest_dependencies(mod, loader_name),
     )
     try:
         build_symbol_index_for_project(project_dir)
-    except Exception:
-        pass
+    except Exception as exc:
+        raise ValueError(f"Dependency scanning failed for {loader_name}: {exc}") from exc
 
     transpiler = JavaTranspiler(
         _forge_api_map_for_project(pkg),
@@ -512,8 +514,8 @@ def generate_forge_project(mod: "Mod", project_dir: Path):
     _write_entity_classes(mod, java_root, pkg, transpiler)
     _write_events(mod, java_root, pkg, transpiler)
     _write_commands(mod, java_root, pkg, transpiler)
-    _write_resources(mod, res_root)
-    _write_gradle_files(mod, project_dir)
+    _write_resources(mod, res_root, loader_name)
+    _write_gradle_files(mod, project_dir, loader_name)
     print(f"[fabricpy] Forge project generated at {project_dir}")
 
 
@@ -583,6 +585,7 @@ public class {class_name} {{
         IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
 
         {"ModBlocks.BLOCKS.register(bus);" if mod._blocks else "// No blocks"}
+        {"ModBlocks.ITEMS.register(bus);" if mod._blocks else ""}
         {"ModItems.ITEMS.register(bus);" if mod._items else "// No items"}
         {"ModBlockEntities.BLOCK_ENTITIES.register(bus);" if has_block_entities else ""}
         {"ModCreativeTabs.TABS.register(bus);" if has_creative_tabs else ""}
@@ -2350,7 +2353,7 @@ public class ModCommands {{
     _write_text(cmd_dir / "ModCommands.java", src)
 
 
-def _write_resources(mod, res_root: Path):
+def _write_resources(mod, res_root: Path, loader_name: str = "forge"):
     # META-INF/mods.toml
     meta_dir = res_root / "META-INF"
     meta_dir.mkdir(parents=True, exist_ok=True)
@@ -2360,7 +2363,7 @@ def _write_resources(mod, res_root: Path):
         raise ValueError(f"Forge does not support minecraft_version={mod.minecraft_version!r} in this generator.")
 
     extra_meta_deps = []
-    for dep in _deps_for_loader(mod, "forge"):
+    for dep in _deps_for_loader(mod, loader_name):
         if dep.mod_id and dep.required:
             extra_meta_deps.append(f"""
 [[dependencies.{mod.mod_id}]]
@@ -2425,10 +2428,8 @@ description="{mod.description}"
         display = advancement["data"].get("display", {})
         if isinstance(display.get("title"), str):
             lang[f"advancement.{mod.mod_id}.{advancement_key}.title"] = display["title"]
-            display["title"] = {"translate": f"advancement.{mod.mod_id}.{advancement_key}.title"}
         if isinstance(display.get("description"), str):
             lang[f"advancement.{mod.mod_id}.{advancement_key}.description"] = display["description"]
-            display["description"] = {"translate": f"advancement.{mod.mod_id}.{advancement_key}.description"}
     for sound in mod._sounds:
         if sound.get("subtitle_text"):
             key = f"subtitles.{mod.mod_id}.{sound['id'].replace('/', '.')}"
@@ -2455,13 +2456,13 @@ description="{mod.description}"
                 }
             })
         )
-        block_model = block.model or {
+        block_model = resolve_model_input(block.model, mod.mod_id, "block", block.block_id, res_root / "assets" / mod.mod_id) or {
             "parent": "minecraft:block/cube_all",
             "textures": block.textures or {
                 "all": _resource_ref(mod.mod_id, block.texture, "block", block.block_id)
             }
         }
-        block_item_model = block.item_model or {
+        block_item_model = resolve_model_input(block.item_model, mod.mod_id, "item", block.block_id, res_root / "assets" / mod.mod_id) or {
             "parent": f"{mod.mod_id}:block/{block.block_id}"
         }
         emissive_ref = _resource_ref(mod.mod_id, block.emissive_texture, "block", f"{block.block_id}_emissive")
@@ -2470,7 +2471,7 @@ description="{mod.description}"
             base_overlay_model = _load_block_model_data(Path.cwd(), mod, block, default_model_id)
             if not isinstance(base_overlay_model, dict):
                 base_overlay_model = block_model
-            overlay_model = block.emissive_model or json.loads(json.dumps(base_overlay_model))
+            overlay_model = resolve_model_input(block.emissive_model, mod.mod_id, "block", block.block_id + "__emissive", res_root / "assets" / mod.mod_id) or json.loads(json.dumps(base_overlay_model))
             if isinstance(overlay_model, dict):
                 base_textures = base_overlay_model.get("textures", {}) if isinstance(base_overlay_model, dict) else {}
                 overlay_model["ambientocclusion"] = False
@@ -2498,7 +2499,7 @@ description="{mod.description}"
         )
 
     for item in mod._items:
-        item_model = item.model or {
+        item_model = resolve_model_input(item.model, mod.mod_id, "item", item.item_id, res_root / "assets" / mod.mod_id) or {
             "parent": "minecraft:item/generated",
             "textures": item.textures or {
                 "layer0": _resource_ref(mod.mod_id, item.texture, "item", item.item_id)
@@ -2565,17 +2566,17 @@ description="{mod.description}"
     project_root = Path.cwd()
     _copy_tree_if_exists(project_root / "assets" / mod.mod_id, res_root / "assets" / mod.mod_id)
     _copy_tree_if_exists(project_root / "data" / mod.mod_id, res_root / "data" / mod.mod_id)
-    compile_bbmodels_in_assets(res_root / "assets" / mod.mod_id, mod.mod_id)
+    compile_bbmodels_in_assets(res_root / "assets" / mod.mod_id, mod.mod_id, project_root / "assets" / mod.mod_id)
 
 
-def _write_gradle_files(mod, project_dir: Path):
+def _write_gradle_files(mod, project_dir: Path, loader_name: str = "forge"):
     mc = mod.minecraft_version
     use_geckolib = _uses_geckolib(mod)
     v = FORGE_VERSIONS.get(mc)
     if v is None:
         raise ValueError(f"Forge does not support minecraft_version={mc!r} in this generator.")
-    extra_repos = _forge_repository_lines(mod)
-    extra_deps = [_forge_dependency_line(dep, mc) for dep in _deps_for_loader(mod, "forge")]
+    extra_repos = _forge_repository_lines(mod, loader_name)
+    extra_deps = [_forge_dependency_line(dep, mc, loader_name) for dep in _deps_for_loader(mod, loader_name)]
 
     if is_at_least(mc, "1.21"):
         build_gradle = f"""\

@@ -59,6 +59,12 @@ def _required_gradle_version(loader: str, minecraft_version: str) -> str:
     return _version_required_gradle_version(loader, minecraft_version)
 
 
+def _gradle_runtime_minimum(loader: str, minecraft_version: str) -> int:
+    # ModDevGradle runs on Java 17 and uses Gradle toolchains for Minecraft.
+    # Loom and other bundled plugins can require the target JVM during setup.
+    return 17 if loader.lower().strip() == "neoforge" else _required_java_major(minecraft_version)
+
+
 def _java_major_version(java_exe: Path) -> int | None:
     try:
         result = subprocess.run(
@@ -310,15 +316,13 @@ def _setup_gradle_wrapper(project_dir: Path, env: dict[str, str], gradle_version
     wrapper_script = project_dir / ("gradlew.bat" if sys.platform == "win32" else "gradlew")
     wrapper_props = project_dir / "gradle" / "wrapper" / "gradle-wrapper.properties"
 
-    if wrapper_script.exists() and wrapper_props.exists():
+    wrapper_jar = project_dir / "gradle" / "wrapper" / "gradle-wrapper.jar"
+    if wrapper_script.exists() and wrapper_props.exists() and wrapper_jar.is_file():
         props_text = wrapper_props.read_text(encoding="utf-8", errors="ignore")
         if f"gradle-{gradle_version}-bin.zip" in props_text:
             print("[fabricpy] Gradle wrapper already present.")
             return True
         print(f"[fabricpy] Updating Gradle wrapper to {gradle_version}...")
-    elif wrapper_script.exists():
-        print("[fabricpy] Gradle wrapper already present.")
-        return True
 
     gradle_bin = shutil.which("gradle", path=env.get("PATH"))
     if gradle_bin:
@@ -414,12 +418,13 @@ def run_build(project_dir: Path, minecraft_version: str, loader: str, clean: boo
     """
     gradle_version = _required_gradle_version(loader, minecraft_version)
     required_major = _required_java_major(minecraft_version)
-    java_exe = _find_gradle_java_executable(gradle_version, min_major=required_major)
+    runtime_minimum = _gradle_runtime_minimum(loader, minecraft_version)
+    java_exe = _find_gradle_java_executable(gradle_version, min_major=runtime_minimum)
     if not java_exe:
         max_major = _max_java_major_for_gradle(gradle_version)
         print(
             f"[fabricpy] Error: No Java runtime compatible with Gradle {gradle_version} was found. "
-            f"Minecraft {minecraft_version} targets Java {required_major}; install a JDK from {required_major} to {max_major} and retry."
+            f"Install a Gradle runtime JDK from {runtime_minimum} to {max_major}. Minecraft {minecraft_version} compiles with the Java {required_major} toolchain."
         )
         return False
 
@@ -460,12 +465,57 @@ def run_build(project_dir: Path, minecraft_version: str, loader: str, clean: boo
         return False
 
     libs_dir = project_dir / "build" / "libs"
-    if output_dir and libs_dir.exists():
+    jars = [f for f in libs_dir.glob("*.jar") if not f.name.endswith(("-sources.jar", "-javadoc.jar", "-dev.jar"))]
+    if not jars:
+        print(f"[fabricpy] Build produced no distributable JARs in {libs_dir}")
+        return False
+    if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
-        jars = [f for f in libs_dir.glob("*.jar") if "sources" not in f.name]
         for jar in jars:
             dest = output_dir / jar.name
             shutil.copy2(jar, dest)
             print(f"[fabricpy] Built: {dest}")
 
     return True
+
+
+def resolve_project_dependencies(project_dir: Path, minecraft_version: str, loader: str) -> bool:
+    """Resolve the actual Java compile classpath before translating dependency calls."""
+    gradle_version = _required_gradle_version(loader, minecraft_version)
+    runtime_minimum = _gradle_runtime_minimum(loader, minecraft_version)
+    java_exe = _find_gradle_java_executable(gradle_version, min_major=runtime_minimum)
+    if not java_exe:
+        print(f"[fabricpy] Cannot resolve dependencies: install a Gradle {gradle_version} compatible runtime JDK (Java {runtime_minimum} to {_max_java_major_for_gradle(gradle_version)}).")
+        return False
+    env = _build_env(java_exe)
+    if not _setup_gradle_wrapper(project_dir, env, gradle_version):
+        return False
+    meta_dir = project_dir / ".fabricpy_meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    init_script = meta_dir / "resolve.init.gradle"
+    init_script.write_text('''\
+gradle.projectsEvaluated {
+    rootProject.tasks.register('fabricpyResolveDependencies') {
+        doLast {
+            def config = rootProject.configurations.findByName('compileClasspath')
+            def artifacts = config == null ? [] : config.resolvedConfiguration.resolvedArtifacts.collect {
+                def classifier = it.classifier ?: ''
+                def extension = it.extension ?: 'jar'
+                def coordinate = "${it.moduleVersion.id.group}:${it.name}:${it.moduleVersion.id.version}" +
+                    (classifier ? ":${classifier}" : '') + (extension == 'jar' ? '' : "@${extension}")
+                [coordinate: coordinate, classifier: classifier, extension: extension, path: it.file.absolutePath]
+            }
+            def output = new File(rootProject.projectDir, '.fabricpy_meta/resolved_dependencies.json')
+            output.text = groovy.json.JsonOutput.toJson(artifacts)
+        }
+    }
+}
+''', encoding="utf-8")
+    gradlew = project_dir / ("gradlew.bat" if sys.platform == "win32" else "gradlew")
+    try:
+        result = subprocess.run([str(gradlew), "--no-daemon", "--init-script", str(init_script), "fabricpyResolveDependencies"],
+                                cwd=project_dir, env=env, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[fabricpy] Dependency resolution failed: {exc}")
+        return False
+    return result.returncode == 0

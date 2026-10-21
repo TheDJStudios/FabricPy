@@ -1,5 +1,5 @@
 """
-fabricpy — Write Minecraft mods in Python, compile to Fabric and Forge .jar files.
+fabricpy — Write Minecraft mods in Python using pluggable loader backends.
 
 Usage:
     import fabricpy as mc
