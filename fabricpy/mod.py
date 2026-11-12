@@ -675,7 +675,7 @@ class Mod:
     # Event system
     # ------------------------------------------------------------------ #
 
-    def event(self, event_name: str):
+    def event(self, event_name: str, *, side: str | None = None):
         """
         Decorator to register an event handler function.
 
@@ -693,9 +693,15 @@ class Mod:
             def on_join(ctx):
                 ctx.player.send_message("Welcome!")
         """
+        from fabricpy.compiler.hook_sides import INTERACTION_EVENTS, validate_hook_side
+        if side is not None:
+            validate_hook_side(side)
+            if event_name not in INTERACTION_EVENTS:
+                raise ValueError("side is configurable for player interaction events only")
         def decorator(func):
             self._events.append({
                 "event": event_name,
+                "side": side or "server",
                 "func": func,
                 "source": inspect.getsource(func),
             })

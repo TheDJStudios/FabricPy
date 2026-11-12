@@ -29,6 +29,13 @@ if TYPE_CHECKING:
     from fabricpy.mod import Mod
 
 from fabricpy.compiler.transpiler import JavaTranspiler
+from fabricpy.compiler.item_features import effective_stack_size, item_storage_api_map
+from fabricpy.compiler.item_storage import write_item_storage_helpers
+from fabricpy.compiler.item_transfers import write_item_transfer_helpers
+from fabricpy.compiler.item_menus import write_item_menu_helpers
+from fabricpy.compiler.item_attachment_rendering import (attachment_items, attachment_proxy_registrations, attachment_item_client_extension, attachment_client_init_statement, write_attachment_renderer, write_attachment_resources)
+from fabricpy.compiler.music_discs import write_music_disc_class, write_music_disc_resources, music_disc_init_statement
+from fabricpy.compiler.hook_sides import INTERACTION_EVENTS, guard_hook_body
 from fabricpy.compiler.dependencies import dependencies_for_loader, gradle_notation
 from fabricpy.compiler.symbol_index import write_interop_metadata
 from fabricpy.compiler.jar_scanner import build_symbol_index_for_project
@@ -381,12 +388,13 @@ def _forge_api_map_for_project(pkg: str) -> dict[str, str]:
         "ctx.world.raycast_block_pos_x": f"{runtime}.raycastBlockPosX(level, {{0}}, {{1}})",
         "ctx.world.raycast_block_pos_y": f"{runtime}.raycastBlockPosY(level, {{0}}, {{1}})",
         "ctx.world.raycast_block_pos_z": f"{runtime}.raycastBlockPosZ(level, {{0}}, {{1}})",
-        "ctx.client.open_screen": f"{screens}.open(client, {{0}})",
-        "ctx.client.close_screen": "client.setScreen(null)",
+        "ctx.client.open_screen": f"{screens}.openClient({{0}})",
+        "ctx.client.close_screen": f"{screens}.closeClient()",
         "ctx.net.send_to_server": f"{network}.sendToServer({{0}}, {{1}})",
         "ctx.net.send_to_player": f"{network}.sendToPlayer((ServerPlayer)({{0}}), {{1}}, {{2}})",
         "ctx.net.broadcast": f"{network}.broadcast(server, {{0}}, {{1}})",
     })
+    api_map.update(item_storage_api_map(pkg))
     return api_map
 
 
@@ -498,19 +506,23 @@ def generate_forge_project(mod: "Mod", project_dir: Path, *, loader_name: str = 
         interop_index_path=project_dir / ".fabricpy_meta" / "symbol_index.json",
     )
 
-    _write_main_class(mod, java_root, pkg)
+    _write_main_class(mod, java_root, pkg, loader_name)
     _write_runtime_helpers(mod, java_root, pkg)
     _write_network(mod, java_root, pkg, transpiler)
     _write_screens(mod, java_root, pkg, transpiler)
     _write_mod_blocks(mod, java_root, pkg)
     _write_mod_block_entities(mod, java_root, pkg)
-    _write_mod_items(mod, java_root, pkg)
+    _write_mod_items(mod, java_root, pkg, loader_name)
     _write_mod_creative_tabs(mod, java_root, pkg)
     _write_mod_keybinds(mod, java_root, pkg, transpiler)
     _write_mod_entities(mod, java_root, pkg)
     _write_geo_block_renderers(mod, java_root, pkg)
     _write_block_classes(mod, java_root, pkg, transpiler)
-    _write_item_classes(mod, java_root, pkg, transpiler)
+    _write_item_classes(mod, java_root, pkg, transpiler, loader_name)
+    write_item_storage_helpers(mod, java_root, pkg, loader_name)
+    write_item_transfer_helpers(mod, java_root, pkg, loader_name)
+    write_item_menu_helpers(mod, java_root, pkg, loader_name)
+    write_attachment_renderer(mod, java_root, pkg, loader_name)
     _write_entity_classes(mod, java_root, pkg, transpiler)
     _write_events(mod, java_root, pkg, transpiler)
     _write_commands(mod, java_root, pkg, transpiler)
@@ -519,7 +531,7 @@ def generate_forge_project(mod: "Mod", project_dir: Path, *, loader_name: str = 
     print(f"[fabricpy] Forge project generated at {project_dir}")
 
 
-def _write_main_class(mod, java_root: Path, pkg: str):
+def _write_main_class(mod, java_root: Path, pkg: str, loader_name: str = "forge"):
     class_name = to_pascal(mod.mod_id)
     has_block_entities = bool(_blocks_with_block_entities(mod))
     has_creative_tabs = bool(mod._creative_tabs)
@@ -586,6 +598,7 @@ public class {class_name} {{
 
         {"ModBlocks.BLOCKS.register(bus);" if mod._blocks else "// No blocks"}
         {"ModBlocks.ITEMS.register(bus);" if mod._blocks else ""}
+        {music_disc_init_statement(mod, loader_name)}
         {"ModItems.ITEMS.register(bus);" if mod._items else "// No items"}
         {"ModBlockEntities.BLOCK_ENTITIES.register(bus);" if has_block_entities else ""}
         {"ModCreativeTabs.TABS.register(bus);" if has_creative_tabs else ""}
@@ -655,7 +668,7 @@ public class FabricPyRuntime {{
     }}
 
     public static BlockHitResult raycastBlock(Level level, Vec3 start, Vec3 end) {{
-        return level.clip(new ClipContext(start, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, null));
+        return level.clip(new ClipContext(start, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, {"(net.minecraft.world.entity.Entity) null" if is_at_least(mod.minecraft_version, "1.21") else "null"}));
     }}
 
     public static String raycastBlockId(Level level, Vec3 start, Vec3 end) {{
@@ -683,7 +696,7 @@ public class FabricPyRuntime {{
     }}
 
     public static void spawnParticle(Level level, String particleId, double x, double y, double z, double dx, double dy, double dz, double speed, int count) {{
-        var particleType = ForgeRegistries.PARTICLE_TYPES.getValue(new net.minecraft.resources.ResourceLocation(particleId));
+        var particleType = ForgeRegistries.PARTICLE_TYPES.getValue({"net.minecraft.resources.ResourceLocation.parse(particleId)" if is_at_least(mod.minecraft_version, "1.21") else "new net.minecraft.resources.ResourceLocation(particleId)"});
         if (!(particleType instanceof SimpleParticleType simple)) {{
             return;
         }}
@@ -851,7 +864,7 @@ def _write_screens(mod, java_root: Path, pkg: str, transpiler: JavaTranspiler):
         for button in screen.buttons:
             body = transpiler.transpile_method(button.source) if button.source else "            // No handler"
             button_lines.append(f"""\
-        this.addRenderableWidget(net.minecraft.client.gui.components.Button.builder(net.minecraft.network.chat.Component.literal("{button.text}"), widget -> {{
+        this.addRenderableWidget(net.minecraft.client.gui.components.Button.builder(net.minecraft.network.chat.Component.literal({json.dumps(button.text)}), widget -> {{
             var client = this.minecraft;
             var screen = this;
             var player = client != null ? client.player : null;
@@ -862,7 +875,7 @@ def _write_screens(mod, java_root: Path, pkg: str, transpiler: JavaTranspiler):
 {body}
         }}).bounds({button.x}, {button.y}, {button.width}, {button.height}).build());""")
         label_lines = [
-            f'        guiGraphics.drawString(this.font, net.minecraft.network.chat.Component.literal("{label["text"]}"), {label["x"]}, {label["y"]}, {label["color"]});'
+            f'        guiGraphics.drawString(this.font, net.minecraft.network.chat.Component.literal({json.dumps(label["text"])}), {label["x"]}, {label["y"]}, {label["color"]});'
             for label in screen.labels
         ]
         src = f"""\
@@ -875,7 +888,7 @@ import net.minecraft.network.chat.Component;
 
 public class {cn} extends Screen {{
     public {cn}() {{
-        super(Component.literal("{screen.title}"));
+        super(Component.literal({json.dumps(screen.title)}));
     }}
 
     @Override
@@ -895,7 +908,7 @@ public class {cn} extends Screen {{
 
     @Override
     public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {{
-        this.renderBackground(guiGraphics);
+        {"this.renderBackground(guiGraphics, mouseX, mouseY, partialTick);" if is_at_least(mod.minecraft_version, "1.21") else "this.renderBackground(guiGraphics);"}
         super.render(guiGraphics, mouseX, mouseY, partialTick);
         guiGraphics.drawCenteredString(this.font, this.title, this.width / 2, 12, 0xFFFFFF);
 {chr(10).join(label_lines) if label_lines else '        // No labels'}
@@ -916,6 +929,13 @@ package {pkg}.client;
 import net.minecraft.client.Minecraft;
 
 public class ModScreens {{
+    public static void openClient(String screenId) {{
+        open(Minecraft.getInstance(), screenId);
+    }}
+    public static void closeClient() {{
+        Minecraft client = Minecraft.getInstance();
+        if (client != null) client.setScreen(null);
+    }}
     public static void open(Minecraft client, String screenId) {{
         if (client == null || screenId == null) {{
             return;
@@ -1023,7 +1043,7 @@ public class ModBlockEntities {{
     _write_text(be_dir / "ModBlockEntities.java", src)
 
 
-def _write_mod_items(mod, java_root: Path, pkg: str):
+def _write_mod_items(mod, java_root: Path, pkg: str, loader_name: str = "forge"):
     if not mod._items:
         return
 
@@ -1037,6 +1057,8 @@ def _write_mod_items(mod, java_root: Path, pkg: str):
             f'    public static final RegistryObject<Item> {iid.upper()} = '
             f'ITEMS.register("{iid}", {cn}::new);'
         )
+
+    reg_lines.extend(attachment_proxy_registrations(mod, loader_name))
 
     src = f"""\
 package {pkg};
@@ -1497,6 +1519,7 @@ def _write_single_block(mod, block, block_dir: Path, pkg: str, transpiler: JavaT
         body = transpiler.transpile_method(
             __import__("inspect").getsource(hooks["on_use"])
         )
+        body = guard_hook_body(body, hooks["on_use"], "level.isClientSide")
         method_blocks.append(f"""\
     @Override
     public InteractionResult use(BlockState state, Level level, BlockPos pos,
@@ -1512,6 +1535,7 @@ def _write_single_block(mod, block, block_dir: Path, pkg: str, transpiler: JavaT
         body = transpiler.transpile_method(
             __import__("inspect").getsource(hooks["on_place"])
         )
+        body = guard_hook_body(body, hooks["on_place"], "level.isClientSide")
         method_blocks.append(f"""\
     @Override
     public void setPlacedBy(Level level, BlockPos pos, BlockState state,
@@ -1526,6 +1550,7 @@ def _write_single_block(mod, block, block_dir: Path, pkg: str, transpiler: JavaT
         body = transpiler.transpile_method(
             __import__("inspect").getsource(hooks["on_break"])
         )
+        body = guard_hook_body(body, hooks["on_break"], "level.isClientSide")
         method_blocks.append(f"""\
     @Override
     public void playerDestroy(Level level, Player player, BlockPos pos, BlockState state,
@@ -1985,30 +2010,37 @@ public class {cn}BlockEntity extends BlockEntity{" implements GeoBlockEntity" if
     _write_text(block_entity_dir / f"{cn}BlockEntity.java", src)
 
 
-def _write_item_classes(mod, java_root: Path, pkg: str, transpiler: JavaTranspiler):
+def _write_item_classes(mod, java_root: Path, pkg: str, transpiler: JavaTranspiler, loader_name: str = "forge"):
     if not mod._items:
         return
     item_dir = java_root / "item"
     item_dir.mkdir(exist_ok=True)
     for item in mod._items:
-        _write_single_item(mod, item, item_dir, pkg, transpiler)
+        _write_single_item(mod, item, item_dir, pkg, transpiler, loader_name)
 
 
-def _write_single_item(mod, item, item_dir: Path, pkg: str, transpiler: JavaTranspiler):
+def _write_single_item(mod, item, item_dir: Path, pkg: str, transpiler: JavaTranspiler, loader_name: str = "forge"):
+    if write_music_disc_class(mod, item, item_dir, pkg, loader_name):
+        return
     cn = item.get_class_name()
     hooks = item.get_hooks()
 
-    settings = f"new Item.Properties().stacksTo({item.max_stack_size})"
+    settings = f"new Item.Properties().stacksTo({effective_stack_size(item)})"
     if item.max_damage > 0:
         settings += f".durability({item.max_damage})"
     if item.fireproof:
         settings += ".fireResistant()"
 
     method_blocks = []
-    if "on_right_click" in hooks:
+    if "on_right_click" in hooks or item.open_inventory_on_use or item.open_screen_on_use:
         body = transpiler.transpile_method(
             __import__("inspect").getsource(hooks["on_right_click"])
-        )
+        ) if "on_right_click" in hooks else ""
+        body = guard_hook_body(body, hooks.get("on_right_click"), "level.isClientSide")
+        if item.open_inventory_on_use:
+            body += f"\n        if (!level.isClientSide) {{ {pkg}.item.FabricPyItemMenus.open(player, hand, stack); }}"
+        if item.open_screen_on_use:
+            body += f'\n        if (level.isClientSide) {{ {pkg}.client.ModScreens.openClient({json.dumps(item.open_screen_on_use)}); }}'
         method_blocks.append(f"""\
     @Override
     public InteractionResultHolder<ItemStack> use(Level level, Player user, InteractionHand hand) {{
@@ -2019,6 +2051,9 @@ def _write_single_item(mod, item, item_dir: Path, pkg: str, transpiler: JavaTran
         return InteractionResultHolder.success(stack);
     }}""")
 
+    extension = attachment_item_client_extension(mod, item, pkg, loader_name)
+    if extension:
+        method_blocks.append(extension)
     methods_str = "\n\n".join(method_blocks)
 
     src = f"""\
@@ -2273,6 +2308,8 @@ def _write_events(mod, java_root: Path, pkg: str, transpiler: JavaTranspiler):
 
         imports.add(ev_info["import"])
         body = transpiler.transpile_method(ev["source"])
+        if ev_name in INTERACTION_EVENTS:
+            body = guard_hook_body(body, ev["func"], "level.isClientSide", side=ev.get("side", "server"))
 
         setup_line = ev_info.get("setup", "")
         local_lines = "\n".join(ev_info.get("locals", []))
@@ -2294,7 +2331,6 @@ import {pkg}.{to_pascal(mod.mod_id)};
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 {chr(10).join(sorted(imports))}
 
-@Mod.EventBusSubscriber(modid = {to_pascal(mod.mod_id)}.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class ModEvents {{
     private static final Map<UUID, String> LAST_OFFHAND_ITEM = new HashMap<>();
     private static final Map<UUID, Integer> LAST_OFFHAND_COUNT = new HashMap<>();
@@ -2341,7 +2377,6 @@ import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-@Mod.EventBusSubscriber(modid = {to_pascal(mod.mod_id)}.MOD_ID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class ModCommands {{
 
     @SubscribeEvent
@@ -2567,6 +2602,8 @@ description="{mod.description}"
     _copy_tree_if_exists(project_root / "assets" / mod.mod_id, res_root / "assets" / mod.mod_id)
     _copy_tree_if_exists(project_root / "data" / mod.mod_id, res_root / "data" / mod.mod_id)
     compile_bbmodels_in_assets(res_root / "assets" / mod.mod_id, mod.mod_id, project_root / "assets" / mod.mod_id)
+    write_music_disc_resources(mod, res_root)
+    write_attachment_resources(mod, res_root)
 
 
 def _write_gradle_files(mod, project_dir: Path, loader_name: str = "forge"):

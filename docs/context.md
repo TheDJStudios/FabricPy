@@ -2,13 +2,79 @@
 
 Every block hook, item hook, event handler, keybind handler, and command callback receives a generated `ctx` surface.
 
-You write Python against `ctx`. The compiler maps those calls to Fabric or Forge Java.
+You write Python against `ctx`. The compiler maps those calls to the selected loader backend's Java APIs.
 
 The important mental model is:
 
 - `ctx` is not a generic Python object
 - `ctx` is a compiler surface
 - some values are available only in certain hooks/events
+
+## IDE autocomplete with context annotations
+
+Annotate the callback parameter with its hook's context type. For example:
+
+```python
+import fabricpy as mc
+
+@mod.register
+class Bell(mc.Block):
+    block_id = "bell"
+
+    @mc.on_use
+    def interact(self, ctx: mc.BlockUseContext) -> None:
+        ctx.player.send_message("dong")
+```
+
+Typing `ctx.` or `ctx.player.` now offers the appropriate fields and methods in
+IDEs that support Python type hints. The installed package includes `py.typed`;
+no separate stub package is needed. These are `typing.Protocol` definitions for
+annotations, not objects to instantiate or a runtime context manager. Adding an
+annotation does not change the generated Java or create a Python runtime context.
+Use positional arguments for helper calls.
+
+| Decorator / callback | Context annotation |
+| --- | --- |
+| Block `@mc.on_use` | `ctx: mc.BlockUseContext` |
+| Block `@mc.on_place` | `ctx: mc.BlockPlaceContext` |
+| Block `@mc.on_break` | `ctx: mc.BlockBreakContext` |
+| Item `@mc.on_right_click` | `ctx: mc.ItemUseContext` |
+| Block `@mc.on_tick` | `ctx: mc.BlockTickContext` |
+| Entity `@mc.on_tick` | `ctx: mc.EntityTickContext` |
+
+A placement's `ctx.player` can be `None`, since its placer may not be a player:
+
+```python
+@mc.on_place
+def placed(self, ctx: mc.BlockPlaceContext) -> None:
+    if ctx.player is not None:
+        ctx.player.send_message("Placed")
+```
+
+For blocks with a generated block entity, use `mc.BlockEntityUseContext`,
+`mc.BlockEntityPlaceContext`, or `mc.BlockEntityBreakContext` to also complete
+`ctx.block_entity`. Persistent data helpers require `uses_block_data = True`;
+animation helpers require the appropriate GeckoLib resources.
+
+```python
+@mod.register
+class Counter(mc.Block):
+    block_id = "counter"
+    uses_block_data = True
+
+    @mc.on_use
+    def interact(self, ctx: mc.BlockEntityUseContext) -> None:
+        count = ctx.block_entity.get_int("uses")
+        ctx.block_entity.set_int("uses", count + 1)
+        ctx.block_entity.sync()
+```
+
+The context types reflect hook availability: item-use contexts have no block
+position, placement contexts have no hand/stack, and entity ticks have no player.
+`ctx.state` and raycast hit results remain opaque because their Java types vary
+by backend. The types do not validate arbitrary raw Java calls or every optional
+feature. Event, packet, screen, keybind, command and mixin callback contexts are
+not yet covered by these hook-specific annotations.
 
 ## Major Context Areas
 
@@ -103,7 +169,7 @@ def story_check(ctx):
 - `ctx.world.is_day()`
 - `ctx.world.is_raining()`
 - `ctx.world.get_dimension()`
-- `ctx.world.spawn_lightning()`
+- `ctx.world.spawn_lightning()` (Fabric-specific; not part of the portable typed surface)
 - `ctx.world.spawn_entity(entity_id, x, y, z)`
 - `ctx.world.set_block_in_dimension(dimension_id, x, y, z, block_id)`
 - `ctx.world.fill_in_dimension(dimension_id, x1, y1, z1, x2, y2, z2, block_id, mode)`
@@ -116,6 +182,15 @@ def story_check(ctx):
 - `ctx.world.raycast_block_pos_x(start_vec, end_vec)`
 - `ctx.world.raycast_block_pos_y(start_vec, end_vec)`
 - `ctx.world.raycast_block_pos_z(start_vec, end_vec)`
+
+## Hand Helpers
+
+- `ctx.hand.is_main_hand()`
+- `ctx.hand.is_off_hand()`
+
+Interaction events can represent distinct hand attempts. If only main-hand
+attempts matter, explicitly check `ctx.hand.is_main_hand()` rather than treating
+all offhand interactions as duplicates.
 
 ## Stack Helpers
 
@@ -237,3 +312,10 @@ Typical patterns:
 For advanced cases, `ctx` values are also emitted as real Java objects in generated source. That means advanced direct calls can be expressed when you know the loader-side API names.
 
 See [interop.md](./interop.md) for the dependency side of that system.
+
+## Typed item storage helpers
+
+Use `ctx: mc.ItemUseContext` in item-use callbacks for IDE completion on
+`ctx.stack.data`, `ctx.stack.inventory` and `ctx.stack.attachments`.
+See [persistent item storage](item-storage.md) for their methods and
+[visible attachments](item-attachments.md) for model transforms.

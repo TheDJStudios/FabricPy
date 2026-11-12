@@ -67,20 +67,65 @@ def _adapt_neoforge_121_java(text: str) -> str:
     # 1.21 separates item-bearing interactions from empty-hand block interaction.
     use_pattern = re.compile(
         r"public InteractionResult use\(BlockState state, Level level, BlockPos pos,\s*"
-        r"Player player, InteractionHand hand, BlockHitResult hit\) \{(.*?)\n    \}", re.DOTALL,
+        r"Player player, InteractionHand hand, BlockHitResult hit\) \{",
     )
-    def replace_use(match):
-        body = match.group(1).replace("        ItemStack stack = player.getItemInHand(hand);\n", "")
+    pieces = []
+    cursor = 0
+    for match in use_pattern.finditer(text):
+        closing = _java_block_end(text, match.end() - 1)
+        body = text[match.end():closing].replace("        ItemStack stack = player.getItemInHand(hand);\n", "")
         body = body.replace("return InteractionResult.", "return net.minecraft.world.ItemInteractionResult.")
-        return (
+        pieces.append(text[cursor:match.start()])
+        pieces.append(
             "public net.minecraft.world.ItemInteractionResult useItemOn(ItemStack stack, BlockState state, Level level, BlockPos pos,\n"
-            "                                  Player player, InteractionHand hand, BlockHitResult hit) {" + body + "\n    }\n\n"
+            "                                  Player player, InteractionHand hand, BlockHitResult hit) {" + body + "}\n\n"
             "    @Override\n"
             "    public InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n"
             "        return useItemOn(player.getMainHandItem(), state, level, pos, player, InteractionHand.MAIN_HAND, hit).result();\n"
             "    }"
         )
-    return use_pattern.sub(replace_use, text)
+        cursor = closing + 1
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _java_block_end(text: str, opening: int) -> int:
+    """Find a generated method's end without mistaking callback branches for it."""
+    depth, quote, escaped = 1, None, False
+    line_comment, block_comment = False, False
+    index = opening + 1
+    while index < len(text):
+        char = text[index]
+        following = text[index:index + 2]
+        if line_comment:
+            line_comment = char != "\n"
+        elif block_comment:
+            if following == "*/":
+                block_comment = False
+                index += 1
+        elif quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif following == "//":
+            line_comment = True
+            index += 1
+        elif following == "/*":
+            block_comment = True
+            index += 1
+        elif char in {'"', "'"}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    raise ValueError("Generated NeoForge interaction method has an unclosed Java block")
 
 
 def _rewrite_resource_locations(text: str) -> str:

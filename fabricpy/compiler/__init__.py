@@ -175,14 +175,32 @@ def _validate(mod: "Mod"):
         if "on_tick" in block.get_hooks() and not (block.has_block_entity or getattr(block, "uses_block_data", False) or getattr(block, "geo_model", "")):
             errors.append(f"{block.__name__} uses @on_tick but has_block_entity is not enabled")
 
+    from fabricpy.compiler.item_features import validate_item_features, has_item_storage
+    from fabricpy.compiler.music_discs import validate_music_disc
+    from fabricpy.compiler.item_attachment_rendering import validate_attachment_rendering, attachment_proxy_id
+    from fabricpy.music_disc import MusicDisc
     item_ids = set()
     for item in mod._items:
+        try:
+            validate_item_features(mod, item)
+            validate_attachment_rendering(mod, item)
+            validate_music_disc(mod, item)
+            if issubclass(item, MusicDisc) and has_item_storage(item):
+                errors.append(f"{item.__name__}: MusicDisc cannot also own an inventory or attachment slots")
+            if issubclass(item, MusicDisc) and (item.open_screen_on_use or item.open_inventory_on_use):
+                errors.append(f"{item.__name__}: MusicDisc cannot override native use with an automatic screen")
+        except (ValueError, TypeError) as exc:
+            errors.append(str(exc))
         if not item.item_id:
             errors.append(f"{item.__name__} is missing item_id")
         elif item.item_id in item_ids:
             errors.append(f"duplicate item_id: {item.item_id}")
         else:
             item_ids.add(item.item_id)
+
+    for item in mod._items:
+        if getattr(item, "attachment_slots", ()) and attachment_proxy_id(item) in (item_ids | block_ids):
+            errors.append(f"{item.__name__}: reserved attachment proxy ID {attachment_proxy_id(item)!r} conflicts with an item")
 
     entity_ids = set()
     for entity in mod._entities:

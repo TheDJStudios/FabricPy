@@ -87,4 +87,21 @@ This screen system is intentionally simple:
 - buttons
 - open handler
 
-It is not yet a full inventory/menu/container system. For now it is the lightweight custom client UI layer.
+For persistent item slots, use the [item inventory GUI](item-guis.md).
+Client button handlers run locally; use a server packet with server-side validation
+when a button must change gameplay state.
+
+## Opening a panel from an item
+
+```python
+@mod.register
+class Guide(mc.Item):
+    item_id = "guide"
+    open_screen_on_use = "panel"  # a screen declared with mod.screen("panel", ...)
+```
+
+This opens the panel on the client when the item is used. Choose one automatic
+use action per item: `open_screen_on_use` for a client panel, or
+`open_inventory_on_use` for its persistent storage GUI. An ordinary
+`@mc.on_right_click(side="client")` hook can also call
+`ctx.client.open_screen("panel")`.

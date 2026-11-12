@@ -59,6 +59,14 @@ class Item(metaclass=ItemMeta):
     tool_type: str = ""
     tool_material: str = "iron"
 
+    # ---- Persistent item storage ----
+    inventory_size: int = 0             # Fixed slots; GUI uses multiples of 9 up to 54
+    inventory_title: str = ""           # Defaults to the translated item name
+    open_inventory_on_use: bool = False
+    open_screen_on_use: str = ""        # Client panel ID from mod.screen(...)
+    attachment_slots: tuple[str, ...] = ()
+    attachment_models: dict = {}        # Slot -> position/rotation/scale lists
+
     # ---- Assets ----
     texture: str = ""                   # Shortcut for generated item layer0
     emissive_texture: str = ""          # Optional overlay texture for emissive parts

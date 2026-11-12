@@ -148,6 +148,10 @@ FABRIC_API_MAP: dict[str, str] = {
         'state',
     "ctx.hand":
         'hand',
+    "ctx.hand.is_main_hand":
+        '(hand == net.minecraft.util.Hand.MAIN_HAND)',
+    "ctx.hand.is_off_hand":
+        '(hand == net.minecraft.util.Hand.OFF_HAND)',
     "ctx.stack":
         'stack',
     "ctx.stack.get_item_id":
@@ -421,6 +425,10 @@ FORGE_API_MAP: dict[str, str] = {
         'state',
     "ctx.hand":
         'hand',
+    "ctx.hand.is_main_hand":
+        '(hand == net.minecraft.world.InteractionHand.MAIN_HAND)',
+    "ctx.hand.is_off_hand":
+        '(hand == net.minecraft.world.InteractionHand.OFF_HAND)',
     "ctx.stack":
         'stack',
     "ctx.stack.get_item_id":

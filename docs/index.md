@@ -46,6 +46,14 @@ If you are working on advanced systems, also read:
 - [decorators.md](./decorators.md): block/item/mixin decorators
 - [context.md](./context.md): `ctx` surface and all mapped helper calls
 
+## Portable item features
+
+- [music-discs.md](./music-discs.md): native jukebox music discs
+- [item-storage.md](./item-storage.md): persistent item data and inventory functions
+- [item-attachments.md](./item-attachments.md): named slots and visible models
+- [item-guis.md](./item-guis.md): persistent storage GUIs
+- [screens.md](./screens.md): client panels, buttons and labels
+
 ## Advanced / Compiler Reference
 
 - [animations.md](./animations.md): GeckoLib-backed animated blocks

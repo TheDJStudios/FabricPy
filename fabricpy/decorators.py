@@ -1,6 +1,8 @@
 """
 Decorators that mark Python methods as Minecraft event hooks.
 These get picked up by the compiler and translated to Java override methods.
+Placement, break and use hooks default to the logical server. Pass side="client"
+or side="both" explicitly for effects intended to run on those sides.
 """
 
 def _mark(hook_type, **kwargs):
@@ -12,7 +14,14 @@ def _mark(hook_type, **kwargs):
     return decorator
 
 
-def on_use(func):
+def _sided_hook(hook_type, func, side):
+    from fabricpy.compiler.hook_sides import validate_hook_side
+    validate_hook_side(side)
+    decorator = _mark(hook_type, side=side)
+    return decorator(func) if func is not None else decorator
+
+
+def on_use(func=None, *, side: str = "server"):
     """
     Block: Called when a player right-clicks the block.
     Maps to: onUse() / use() override.
@@ -20,12 +29,10 @@ def on_use(func):
     Java params available via ctx:
         ctx.player, ctx.world, ctx.pos, ctx.state, ctx.hand
     """
-    func._fabricpy_hook = "on_use"
-    func._fabricpy_hook_args = {}
-    return func
+    return _sided_hook("on_use", func, side)
 
 
-def on_right_click(func):
+def on_right_click(func=None, *, side: str = "server"):
     """
     Item: Called when a player right-clicks with the item.
     Maps to: use() override.
@@ -33,12 +40,10 @@ def on_right_click(func):
     Java params available via ctx:
         ctx.player, ctx.world, ctx.stack, ctx.hand
     """
-    func._fabricpy_hook = "on_right_click"
-    func._fabricpy_hook_args = {}
-    return func
+    return _sided_hook("on_right_click", func, side)
 
 
-def on_place(func):
+def on_place(func=None, *, side: str = "server"):
     """
     Block: Called when the block is placed.
     Maps to: onPlaced() override.
@@ -46,12 +51,10 @@ def on_place(func):
     Java params available via ctx:
         ctx.player, ctx.world, ctx.pos, ctx.state
     """
-    func._fabricpy_hook = "on_place"
-    func._fabricpy_hook_args = {}
-    return func
+    return _sided_hook("on_place", func, side)
 
 
-def on_break(func):
+def on_break(func=None, *, side: str = "server"):
     """
     Block: Called when the block is broken.
     Maps to: onBreak() override.
@@ -59,9 +62,7 @@ def on_break(func):
     Java params available via ctx:
         ctx.player, ctx.world, ctx.pos, ctx.state
     """
-    func._fabricpy_hook = "on_break"
-    func._fabricpy_hook_args = {}
-    return func
+    return _sided_hook("on_break", func, side)
 
 
 def on_tick(func):

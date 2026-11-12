@@ -61,13 +61,30 @@ class Table(mc.Block):
     model = 'table.bbmodel'
     model_collision = True
     @mc.on_use
-    def on_use(self, ctx):
+    def on_use(self, ctx: mc.BlockUseContext):
         widget = dep.helper.sample.Widget("Hello from Python")
         ctx.player.send_message(widget.message())
+    @mc.on_place
+    def placed(self, ctx: mc.BlockPlaceContext):
+        if ctx.player is not None:
+            ctx.player.send_message("Placed once on the server")
+    @mc.on_break
+    def broken(self, ctx: mc.BlockBreakContext):
+        ctx.player.send_message("Broken once on the server")
 @mod.register
 class Token(mc.Item):
     item_id = 'token'
     model = 'table.bbmodel'
+    @mc.on_right_click
+    def use(self, ctx: mc.ItemUseContext):
+        ctx.player.send_message("Used once on the server")
+@mod.event('player_use_block')
+def use_block(ctx):
+    if ctx.hand.is_main_hand():
+        ctx.player.send_message("Main-hand block interaction")
+@mod.event('player_interact_entity')
+def interact_entity(ctx):
+    ctx.player.send_message("Entity interaction")
 ''', encoding='utf-8')
     from fabricpy.__main__ import main as build
     result = build(['build', str(folder / 'mod.py'), '--loader', args.loader,

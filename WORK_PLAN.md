@@ -92,3 +92,65 @@ An independent subagent audited source freshness, metadata, license, addon data,
 RECORD hashes and clean contents. The source archive includes docs, tests and the
 integration example, and excludes caches/JARs/old distribution metadata.
 Project links and an Alpha classifier are included. Nothing has been published.
+
+## Callback duplication and IDE typing (2026-10-22)
+
+- User-reported duplicate place/use effects reproduced in generated code: callbacks
+  were executed on both logical client and logical server. Four lifecycle/use
+  decorators now default to server execution, with explicit client/both options.
+- The four global player interaction observers use the same default and side
+  option, while retaining separate hand attempts and vanilla PASS/results.
+- Added main-hand/offhand helper predicates, preserved vanilla superclass calls,
+  fixed missing Fabric ActionResult event import, and repaired NeoForge method
+  rewriting for nested callback braces. Removed redundant Forge auto-subscriber
+  annotations while retaining explicit event registration. Bus registration itself
+  was deduplicated by Forge and was not the duplicate-effects cause.
+- Exposed annotation-only hook context Protocols and portable nested helper APIs;
+  shipped py.typed and per-decorator annotation examples in docs/context.md and
+  docs/decorators.md. Placement context correctly has an optional player.
+- 43 tests pass. The executable Java harness exercises all four loaders and all
+  three side settings against a simulated client/server action pair. Expanded real
+  loader builds pass on Fabric/Forge/Quilt1.20.1 and NeoForge1.21.1 with typed
+  use/place/break/item hooks and global interaction observers.
+- Refreshed dist/pypi artifacts pass strict Twine checks and installed-package
+  annotation/marker checks. No release uploaded; version remains0.1.0.
+
+## Release 0.1.1
+
+Bumped distribution and Python __version__ to 0.1.1. Built wheel and source archive
+under dist/pypi; both pass strict Twine validation and embedded version checks.
+No upload performed.
+
+## Portable item features (2026-10-22)
+
+Goal: native music discs, named attachment slots with visible models, persistent
+item inventories and functions, and useful GUIs across the bundled loader targets,
+with Minecraft 1.20.1 as the primary target.
+
+1. [x] Define portable Python fields, validation and typed context APIs.
+2. [x] Generate native music discs, sound registration and jukebox resources.
+3. [x] Persist real inventory/attachment stacks and scalar item data.
+4. [x] Add server-authoritative transfer functions and vanilla storage menus.
+5. [x] Connect visible attachment models to each loader's native item renderer.
+6. [x] Add item-opened client panels, documentation and a standalone example.
+7. [x] Run focused behavior tests and complete real loader builds; record limits.
+
+Subagents implemented storage/typing, menus/transfers, and discs/rendering in
+parallel. Root integrated shared generators and the full example. These changes
+are unreleased; the pre-existing 0.1.1 distributions have not been replaced.
+
+Verification: 71 unit/behavior tests pass, including executable Java storage,
+conservation/authority, menu ownership, callback side and branch-scope checks.
+The complete examples/item_features.py builds on Fabric/Forge/Quilt 1.20.1 and
+Fabric/Forge/NeoForge 1.21.1. Inspected all six JARs for compiled helpers, native
+disc resources and original/attachment proxy models. Fixed existing modern
+particle/raycast API incompatibilities and Python branch-variable scope exposed
+by those builds. Temporary wheel/sdist validation passes strict Twine checks;
+new modules/type hints/docs/example are included and generated projects excluded.
+
+Limitations: in-game visual/audio/manual interaction QA remains unperformed;
+storage GUI uses vanilla chest layouts (1–6 rows), while custom panels support
+labels/buttons. Named slots currently accept any non-container attachment item;
+slot-specific item filters and attachment-slot GUIs are future extensions.
+Newer Minecraft versions need native API adapters for these features. No release
+version bump or upload was performed; dist/pypi/0.1.1 artifacts remain unchanged.

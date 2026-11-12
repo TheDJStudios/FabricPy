@@ -70,3 +70,76 @@ class TranspilerTests(unittest.TestCase):
             subprocess.run(['javac', 'Check.java'], check=True, capture_output=True, text=True)
             result = subprocess.run(['java', 'Check'], check=True, capture_output=True, text=True)
             self.assertEqual(result.stdout, expected)
+
+    @unittest.skipUnless(shutil.which('javac') and shutil.which('java'), 'JDK required')
+    def test_branch_variables_keep_python_scope_without_evaluating_inactive_calls(self):
+        callback = '''def hook(flag):
+    if flag == 0:
+        moved = ctx.stack.inventory.insert_from_hand("off_hand", 5)
+        label = "inserted"
+    elif flag == 1:
+        moved = ctx.stack.inventory.extract_to_player(0, 3)
+        label = "extracted"
+    else:
+        if flag == 2:
+            moved = 1
+        else:
+            moved = 2
+        label = "other"
+    if label == str("inserted"):
+        moved += 10
+    return f"{moved}:{label}"
+'''
+        api = {
+            'ctx.stack.inventory.insert_from_hand': 'insert({0}, {1})',
+            'ctx.stack.inventory.extract_to_player': 'extract({0}, {1})',
+        }
+        output = JavaTranspiler(api).transpile_method(callback)
+        self.assertEqual(output.count('int moved;'), 1)
+        self.assertEqual(output.count('String label;'), 1)
+        self.assertIn('java.util.Objects.equals(label,', output)
+        with project_dir():
+            Path('BranchCheck.java').write_text('''public class BranchCheck {
+static int calls;
+static int insert(String hand,int n){calls++;return n;}
+static int extract(int slot,int n){calls++;return n;}
+static String hook(int flag) {''' + output + '''}
+public static void main(String[] args){
+String result=hook(0)+"/"+hook(1)+"/"+hook(2)+"/"+hook(3);
+if(calls!=2)throw new AssertionError("inactive branch evaluated");
+System.out.print(result);
+}}''')
+            subprocess.run(['javac', 'BranchCheck.java'], check=True, capture_output=True, text=True)
+            result = subprocess.run(['java', 'BranchCheck'], check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout, '15:inserted/3:extracted/1:other/2:other')
+
+    def test_branch_type_errors_explain_how_to_fix_callback(self):
+        sources = [
+            ('if ctx.flag:\n        value = "text"\n    else:\n        value = 1', 'incompatible types'),
+            ('if ctx.flag:\n        local = 1\n        value = local\n    else:\n        value = 2', 'branch-local'),
+            ('if ctx.flag:\n        value = ctx.unknown()\n    else:\n        value = ctx.other()', 'initialize it before'),
+        ]
+        for body, message in sources:
+            with self.subTest(body=body), self.assertRaisesRegex(TranspileError, message):
+                JavaTranspiler({}).transpile_method('def hook(ctx):\n    ' + body + '\n    return value')
+
+    @unittest.skipUnless(shutil.which('javac') and shutil.which('java'), 'JDK required')
+    def test_branch_numeric_promotion_and_boolean_values(self):
+        output = JavaTranspiler({}).transpile_method('''def hook(flag):
+    if flag:
+        number = 1000
+        enabled = True
+    else:
+        number = 2.5
+        enabled = False
+    if enabled:
+        number += 0.5
+    return number
+''')
+        self.assertIn('double number;', output)
+        self.assertIn('boolean enabled;', output)
+        with project_dir():
+            Path('NumericCheck.java').write_text('public class NumericCheck { static double hook(boolean flag) {' + output + '} public static void main(String[] args) {System.out.print(hook(true)+":"+hook(false));}}')
+            subprocess.run(['javac', 'NumericCheck.java'], check=True, capture_output=True, text=True)
+            result = subprocess.run(['java', 'NumericCheck'], check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout, '1000.5:2.5')

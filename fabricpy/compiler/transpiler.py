@@ -65,6 +65,7 @@ class JavaTranspiler:
         if func_node is None:
             raise TranspileError("Expected a Python function definition")
 
+        self._function = func_node
         self._lines = []
         self._variables = {}
         self._string_variables = set()
@@ -181,7 +182,93 @@ class JavaTranspiler:
             return self._is_string(node.left) or self._is_string(node.right)
         return False
 
+    def _definite_assignments(self, statements):
+        """Initial values of names assigned on every path through a block."""
+        assigned = {}
+        for statement in statements:
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                target, value = statement.targets[0], statement.value
+                if isinstance(target, ast.Name):
+                    assigned.setdefault(target.id, []).append(value)
+            elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+                if isinstance(statement.target, ast.Name):
+                    assigned.setdefault(statement.target.id, []).append(statement.value)
+            elif isinstance(statement, ast.If) and statement.orelse:
+                left = self._definite_assignments(statement.body)
+                right = self._definite_assignments(statement.orelse)
+                for name in left.keys() & right.keys():
+                    assigned.setdefault(name, []).extend(left[name] + right[name])
+        return assigned
+
+    def _branch_value_type(self, node):
+        if self._is_string(node):
+            return "String"
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool):
+                return "boolean"
+            if isinstance(node.value, int):
+                return "int"
+            if isinstance(node.value, float):
+                return "double"
+        if isinstance(node, (ast.Compare, ast.BoolOp)):
+            return "boolean"
+        if isinstance(node, ast.UnaryOp):
+            return "boolean" if isinstance(node.op, ast.Not) else self._branch_value_type(node.operand)
+        if isinstance(node, ast.BinOp):
+            left, right = self._branch_value_type(node.left), self._branch_value_type(node.right)
+            if left in {"int", "double"} and right in {"int", "double"}:
+                return "double" if isinstance(node.op, (ast.Div, ast.Pow)) or "double" in {left, right} else "int"
+        if isinstance(node, ast.Call):
+            signature = self._dotted(node.func)
+            if signature in {"int", "float"}:
+                return "int" if signature == "int" else "double"
+            result_types = {
+                "ctx.stack.data.get_int": "int", "ctx.stack.data.get_float": "double",
+                "ctx.stack.data.get_bool": "boolean", "ctx.stack.data.get_string": "String",
+                "ctx.stack.data.contains": "boolean", "ctx.stack.inventory.size": "int",
+                "ctx.stack.inventory.get_count": "int", "ctx.stack.inventory.count": "int",
+                "ctx.stack.inventory.space": "int", "ctx.stack.inventory.contains": "boolean",
+                "ctx.stack.inventory.get_item_id": "String", "ctx.stack.attachments.get_item_id": "String",
+                "ctx.stack.attachments.has": "boolean", "ctx.stack.inventory.open": "boolean",
+                "ctx.stack.inventory.insert_from_hand": "int", "ctx.stack.inventory.extract_to_player": "int",
+                "ctx.stack.attachments.install_from_hand": "boolean", "ctx.stack.attachments.remove_to_player": "boolean",
+            }
+            return result_types.get(signature)
+        return None
+
+    def _hoist_branch_variables(self, node):
+        if not node.orelse:
+            return
+        left = self._definite_assignments(node.body)
+        right = self._definite_assignments(node.orelse)
+        later_loads = {child.id for child in ast.walk(self._function)
+                       if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+                       and child.lineno > node.end_lineno}
+        local_names = {child.id for child in ast.walk(node)
+                       if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)}
+        hoisted_strings = set()
+        for name in sorted((left.keys() & right.keys() & later_loads) - self._variables.keys()):
+            values = left[name] + right[name]
+            for value in values:
+                dependencies = {child.id for child in ast.walk(value)
+                                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)}
+                if dependencies & (local_names - self._variables.keys()):
+                    raise TranspileError(f"Line {node.lineno}: cannot infer branch variable {name!r} from branch-local values; initialize it before the if statement")
+            types = {self._branch_value_type(value) for value in values}
+            known = types - {None}
+            if len(known - {"int", "double"}) > 1 or (known & {"int", "double"} and known - {"int", "double"}):
+                raise TranspileError(f"Line {node.lineno}: incompatible types for branch variable {name!r}; use separate variables")
+            if not known:
+                raise TranspileError(f"Line {node.lineno}: cannot infer the Java type of branch variable {name!r}; initialize it before the if statement")
+            java_type = "double" if "double" in known else next(iter(known))
+            self._emit(f"{java_type} {name};")
+            self._variables[name] = self._depth
+            if java_type == "String":
+                hoisted_strings.add(name)
+        return hoisted_strings
+
     def _if(self, node: ast.If):
+        hoisted_strings = self._hoist_branch_variables(node) or set()
         cond = self._expr(node.test)
         self._emit(f"if ({cond}) {{")
         self._depth += 1
@@ -213,6 +300,7 @@ class JavaTranspiler:
                 self._emit("}")
         else:
             self._emit("}")
+        self._string_variables.update(hoisted_strings)
 
     def _if_orelse(self, orelse: list):
         if len(orelse) == 1 and isinstance(orelse[0], ast.If):

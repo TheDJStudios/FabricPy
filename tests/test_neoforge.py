@@ -53,3 +53,22 @@ class NeoForgeTests(unittest.TestCase):
             _rewrite_resource_locations('new net.minecraft.resources.ResourceLocation(choose("a,b"))'),
             'net.minecraft.resources.ResourceLocation.parse(choose("a,b"))',
         )
+
+    def test_interaction_rewrite_handles_nested_callback_braces_and_string_braces(self):
+        with project_dir() as root:
+            mod = mc.Mod('example', 'Example', minecraft_version='1.21.1', loader='neoforge')
+            @mod.register
+            class Table(mc.Block):
+                block_id = 'table'
+                @mc.on_use(side='both')
+                def interact(self, ctx):
+                    if not ctx.world.is_client():
+                        ctx.player.send_message('brace } in a string')
+                    else:
+                        ctx.player.send_message('client')
+            generate_neoforge_project(mod, root / 'generated')
+            source = (root / 'generated/src/main/java/com/generated/example/block/Table.java').read_text()
+            self.assertIn('public net.minecraft.world.ItemInteractionResult useItemOn(', source)
+            self.assertIn('return net.minecraft.world.ItemInteractionResult.SUCCESS;', source)
+            self.assertNotIn('return InteractionResult.SUCCESS;', source)
+            self.assertIn('useWithoutItem(', source)

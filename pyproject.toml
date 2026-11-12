@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcmod"
-version = "0.1.0"
+version = "0.1.1"
 description = "Write Minecraft mods in Python using pluggable loader backends"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,4 +31,4 @@ include = ["fabricpy", "fabricpy.compiler"]
 namespaces = false
 
 [tool.setuptools.package-data]
-fabricpy = ["addons/**/*.py"]
+fabricpy = ["addons/**/*.py", "py.typed"]

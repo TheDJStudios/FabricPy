@@ -92,3 +92,25 @@ def on_use_item(ctx):
         ctx.player.add_cooldown("playtime:grabpack_cannon", 8)
         ctx.player.send_action_bar("GrabPack hand launched")
 ```
+
+## Logical sides and interaction hands
+
+`player_use_item`, `player_use_block`, `player_attack_entity` and
+`player_interact_entity` run Python effects on the logical server by default.
+This avoids repeating effects during the client's prediction of the same action.
+Select `side="client"` or `side="both"` explicitly on `mod.event(...)` when needed.
+Other event families keep their existing lifecycle semantics.
+
+These global events observe Minecraft's per-hand interaction pipeline. Main-hand
+and offhand callbacks are distinct; FabricPy does not silently discard offhand
+uses or cancel vanilla interaction. If your handler should observe only the main
+hand, use:
+
+```python
+@mod.event("player_use_block")
+def use_block(ctx):
+    if ctx.hand.is_main_hand():
+        ctx.player.send_message("Main-hand interaction")
+```
+
+`ctx.hand.is_off_hand()` is also available for hand-bearing callbacks.

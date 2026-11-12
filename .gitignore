@@ -19,3 +19,7 @@ __pycache__/
 /build/
 
 /dist/pypi/
+
+# Example mod build outputs
+/examples/.fabricpy_build/
+/examples/dist/

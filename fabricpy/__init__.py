@@ -24,15 +24,31 @@ Usage:
 from fabricpy.mod import Mod
 from fabricpy.block import Block
 from fabricpy.item import Item
+from fabricpy.music_disc import MusicDisc
 from fabricpy.entity import Entity
 from fabricpy.addons import list_addons
 from fabricpy.mixin import Mixin
+from fabricpy.context import (
+    BlockUseContext, BlockPlaceContext, BlockBreakContext, ItemUseContext,
+    BlockTickContext, EntityTickContext, BlockEntityUseContext,
+    BlockEntityPlaceContext, BlockEntityBreakContext,
+)
 from fabricpy.decorators import on_use, on_right_click, on_place, on_break, on_tick, inject
 
 __all__ = [
     "Mod",
+    "BlockUseContext",
+    "BlockPlaceContext",
+    "BlockBreakContext",
+    "ItemUseContext",
+    "BlockTickContext",
+    "EntityTickContext",
+    "BlockEntityUseContext",
+    "BlockEntityPlaceContext",
+    "BlockEntityBreakContext",
     "Block",
     "Item",
+    "MusicDisc",
     "Entity",
     "list_addons",
     "Mixin",
@@ -44,4 +60,4 @@ __all__ = [
     "inject",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

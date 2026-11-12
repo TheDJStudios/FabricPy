@@ -42,7 +42,7 @@ class Table(mc.Block):
     model_collision = True
 
     @mc.on_use
-    def interact(self, ctx):
+    def interact(self, ctx: mc.BlockUseContext):
         ctx.player.send_message("Made with Python!")
 
 if __name__ == "__main__":
@@ -66,6 +66,24 @@ outputs relative to the source file's directory. Generated projects go to
 `.fabricpy_build/<modid>-<loader>/`; distributable JARs go to `dist/`. Build failures
 return a nonzero CLI exit code. From Python, `mod.generate()` returns project paths
 and `mod.compile()` returns a dictionary of loader build results.
+
+For IDE autocomplete, annotate callbacks with `mc.BlockUseContext`,
+`mc.BlockPlaceContext`, `mc.BlockBreakContext`, or `mc.ItemUseContext`.
+[Decorator docs](https://github.com/TheDJStudios/FabricPy/blob/main/docs/decorators.md)
+show each signature. Placement, break and use callbacks run on the logical server
+by default; choose `side="client"` or `side="both"` explicitly when needed.
+
+## Item features
+
+Create native jukebox discs with `mc.MusicDisc`, persistent inventories with
+`inventory_size`, and visible upgrades with `attachment_slots` and
+`attachment_models`. Use `ctx: mc.ItemUseContext` for IDE completion on item data,
+transfers and attachment functions. Items can open storage GUIs or button panels.
+
+See [the complete example](examples/item_features.py), [music discs](docs/music-discs.md),
+[item storage](docs/item-storage.md), [visible attachments](docs/item-attachments.md)
+and [GUIs](docs/item-guis.md). These features support the bundled Minecraft
+1.20.1, 1.21 and 1.21.1 targets; newer versions require additional native adapters.
 
 ## Blockbench models
 

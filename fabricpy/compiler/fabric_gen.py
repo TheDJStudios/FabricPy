@@ -30,6 +30,13 @@ if TYPE_CHECKING:
     from fabricpy.mod import Mod
 
 from fabricpy.compiler.transpiler import JavaTranspiler
+from fabricpy.compiler.item_features import effective_stack_size, item_storage_api_map
+from fabricpy.compiler.item_storage import write_item_storage_helpers
+from fabricpy.compiler.item_transfers import write_item_transfer_helpers
+from fabricpy.compiler.item_menus import write_item_menu_helpers
+from fabricpy.compiler.item_attachment_rendering import (attachment_items, attachment_proxy_registrations, attachment_item_client_extension, attachment_client_init_statement, write_attachment_renderer, write_attachment_resources)
+from fabricpy.compiler.music_discs import write_music_disc_class, write_music_disc_resources, music_disc_init_statement
+from fabricpy.compiler.hook_sides import guard_hook_body, INTERACTION_EVENTS
 from fabricpy.compiler.dependencies import dependencies_for_loader, gradle_notation
 from fabricpy.compiler.symbol_index import write_interop_metadata
 from fabricpy.compiler.jar_scanner import build_symbol_index_for_project
@@ -300,12 +307,13 @@ def _fabric_api_map_for_project(minecraft_version: str, pkg: str) -> dict[str, s
         "ctx.world.raycast_block_pos_x": f"{runtime}.raycastBlockPosX(world, {{0}}, {{1}})",
         "ctx.world.raycast_block_pos_y": f"{runtime}.raycastBlockPosY(world, {{0}}, {{1}})",
         "ctx.world.raycast_block_pos_z": f"{runtime}.raycastBlockPosZ(world, {{0}}, {{1}})",
-        "ctx.client.open_screen": f"{screens}.open(client, {{0}})",
-        "ctx.client.close_screen": "client.setScreen(null)",
+        "ctx.client.open_screen": f"{screens}.openClient({{0}})",
+        "ctx.client.close_screen": f"{screens}.closeClient()",
         "ctx.net.send_to_server": f"{network}.sendToServer({{0}}, {{1}})",
         "ctx.net.send_to_player": f"{network}.sendToPlayer((ServerPlayerEntity)({{0}}), {{1}}, {{2}})",
         "ctx.net.broadcast": f"{network}.broadcast(server, {{0}}, {{1}})",
     })
+    api_map.update(item_storage_api_map(pkg))
     return api_map
 
 
@@ -517,20 +525,24 @@ def generate_fabric_project(mod: "Mod", project_dir: Path, *, loader_name: str =
         interop_index_path=project_dir / ".fabricpy_meta" / "symbol_index.json",
     )
 
-    _write_main_class(mod, java_root, pkg)
-    _write_client_class(mod, java_root, pkg)
+    _write_main_class(mod, java_root, pkg, loader_name)
+    _write_client_class(mod, java_root, pkg, loader_name)
     _write_runtime_helpers(mod, java_root, pkg)
     _write_network(mod, java_root, pkg, transpiler)
     _write_screens(mod, java_root, pkg, transpiler)
     _write_mod_blocks(mod, java_root, pkg)
     _write_mod_block_entities(mod, java_root, pkg)
-    _write_mod_items(mod, java_root, pkg)
+    _write_mod_items(mod, java_root, pkg, loader_name)
     _write_mod_creative_tabs(mod, java_root, pkg)
     _write_mod_keybinds(mod, java_root, pkg, transpiler)
     _write_mod_entities(mod, java_root, pkg)
     _write_geo_block_renderers(mod, java_root, pkg)
     _write_block_classes(mod, java_root, pkg, transpiler)
-    _write_item_classes(mod, java_root, pkg, transpiler)
+    _write_item_classes(mod, java_root, pkg, transpiler, loader_name)
+    write_item_storage_helpers(mod, java_root, pkg, loader_name)
+    write_item_transfer_helpers(mod, java_root, pkg, loader_name)
+    write_item_menu_helpers(mod, java_root, pkg, loader_name)
+    write_attachment_renderer(mod, java_root, pkg, loader_name)
     _write_entity_classes(mod, java_root, pkg, transpiler)
     _write_events(mod, java_root, pkg, transpiler)
     _write_commands(mod, java_root, pkg, transpiler)
@@ -544,7 +556,7 @@ def generate_fabric_project(mod: "Mod", project_dir: Path, *, loader_name: str =
 # Main mod class
 # ─────────────────────────────────────────────────────────────────────────── #
 
-def _write_main_class(mod: "Mod", java_root: Path, pkg: str):
+def _write_main_class(mod: "Mod", java_root: Path, pkg: str, loader_name: str = "fabric"):
     class_name = to_pascal(mod.mod_id)
 
     has_blocks = bool(mod._blocks)
@@ -558,6 +570,9 @@ def _write_main_class(mod: "Mod", java_root: Path, pkg: str):
     has_packets = bool(mod._packets)
 
     reg_lines = []
+    disc_init = music_disc_init_statement(mod, loader_name)
+    if disc_init:
+        reg_lines.append("        " + disc_init)
     if has_blocks:
         reg_lines.append(f"        ModBlocks.register();")
     if has_block_entities:
@@ -614,15 +629,18 @@ public class {class_name} implements ModInitializer {{
     _write_text(java_root / f"{class_name}.java", src)
 
 
-def _write_client_class(mod: "Mod", java_root: Path, pkg: str):
+def _write_client_class(mod: "Mod", java_root: Path, pkg: str, loader_name: str = "fabric"):
     cutout_blocks = _blocks_requiring_cutout(mod)
     has_keybinds = bool(mod._keybinds)
     has_geo = _uses_geckolib(mod)
     has_packets = bool(mod._packets)
-    if not cutout_blocks and not has_keybinds and not has_geo and not has_packets:
+    has_attachments = bool(attachment_items(mod))
+    if not cutout_blocks and not has_keybinds and not has_geo and not has_packets and not has_attachments:
         return
     class_name = f"{to_pascal(mod.mod_id)}Client"
     imports = []
+    if has_attachments:
+        imports.append(f"import {pkg}.client.ModAttachmentRenderers;")
     if has_keybinds:
         imports.append(f"import {pkg}.client.ModKeybinds;")
     if has_geo:
@@ -645,6 +663,7 @@ public class {class_name} implements ClientModInitializer {{
 {"        ModKeybinds.registerClient();" if has_keybinds else ""}
 {"        ModGeoRenderers.registerClient();" if has_geo else ""}
 {"        FabricPyNetwork.registerClient();" if has_packets else ""}
+{"        " + attachment_client_init_statement(mod, loader_name) if has_attachments else ""}
     }}
 }}
 """
@@ -659,7 +678,7 @@ package {pkg}.util;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
-import net.minecraft.particle.DefaultParticleType;
+import net.minecraft.particle.{"SimpleParticleType" if is_at_least(mod.minecraft_version, "1.21") else "DefaultParticleType"};
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
@@ -728,8 +747,8 @@ public class FabricPyRuntime {{
     }}
 
     public static void spawnParticle(World world, String particleId, double x, double y, double z, double dx, double dy, double dz, double speed, int count) {{
-        var particleType = Registries.PARTICLE_TYPE.get(new Identifier(particleId));
-        if (!(particleType instanceof DefaultParticleType defaultParticle)) {{
+        var particleType = Registries.PARTICLE_TYPE.get({"Identifier.of(particleId)" if is_at_least(mod.minecraft_version, "1.21") else "new Identifier(particleId)"});
+        if (!(particleType instanceof {"SimpleParticleType" if is_at_least(mod.minecraft_version, "1.21") else "DefaultParticleType"} defaultParticle)) {{
             return;
         }}
         if (world instanceof ServerWorld serverWorld) {{
@@ -867,7 +886,7 @@ def _write_screens(mod: "Mod", java_root: Path, pkg: str, transpiler: JavaTransp
         for button in screen.buttons:
             body = transpiler.transpile_method(button.source) if button.source else "            // No handler"
             button_lines.append(f"""\
-        this.addDrawableChild(net.minecraft.client.gui.widget.ButtonWidget.builder(net.minecraft.text.Text.literal("{button.text}"), widget -> {{
+        this.addDrawableChild(net.minecraft.client.gui.widget.ButtonWidget.builder(net.minecraft.text.Text.literal({json.dumps(button.text)}), widget -> {{
             var client = this.client;
             var screen = this;
             var player = client != null ? client.player : null;
@@ -878,7 +897,7 @@ def _write_screens(mod: "Mod", java_root: Path, pkg: str, transpiler: JavaTransp
 {body}
         }}).dimensions({button.x}, {button.y}, {button.width}, {button.height}).build());""")
         label_lines = [
-            f'        context.drawText(this.textRenderer, net.minecraft.text.Text.literal("{label["text"]}"), {label["x"]}, {label["y"]}, {label["color"]}, false);'
+            f'        context.drawText(this.textRenderer, net.minecraft.text.Text.literal({json.dumps(label["text"])}), {label["x"]}, {label["y"]}, {label["color"]}, false);'
             for label in screen.labels
         ]
         src = f"""\
@@ -891,7 +910,7 @@ import net.minecraft.util.math.BlockPos;
 
 public class {cn} extends Screen {{
     public {cn}() {{
-        super(Text.literal("{screen.title}"));
+        super(Text.literal({json.dumps(screen.title)}));
     }}
 
     @Override
@@ -911,7 +930,7 @@ public class {cn} extends Screen {{
 
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {{
-        this.renderBackground(context);
+        {"this.renderBackground(context, mouseX, mouseY, delta);" if is_at_least(mod.minecraft_version, "1.21") else "this.renderBackground(context);"}
         super.render(context, mouseX, mouseY, delta);
         context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, 12, 0xFFFFFF);
 {chr(10).join(label_lines) if label_lines else '        // No labels'}
@@ -932,6 +951,13 @@ package {pkg}.client;
 import net.minecraft.client.MinecraftClient;
 
 public class ModScreens {{
+    public static void openClient(String screenId) {{
+        open(MinecraftClient.getInstance(), screenId);
+    }}
+    public static void closeClient() {{
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client != null) client.setScreen(null);
+    }}
     public static void open(MinecraftClient client, String screenId) {{
         if (client == null || screenId == null) {{
             return;
@@ -1308,7 +1334,7 @@ public class ModBlockEntities {{
 # Item registry
 # ─────────────────────────────────────────────────────────────────────────── #
 
-def _write_mod_items(mod: "Mod", java_root: Path, pkg: str):
+def _write_mod_items(mod: "Mod", java_root: Path, pkg: str, loader_name: str = "fabric"):
     if not mod._items:
         return
 
@@ -1321,6 +1347,8 @@ def _write_mod_items(mod: "Mod", java_root: Path, pkg: str):
         registrations.append(
             f'    public static final {cn} {iid.upper()} = register("{iid}", new {cn}());'
         )
+
+    registrations.extend(attachment_proxy_registrations(mod, loader_name))
 
     src = f"""\
 package {pkg};
@@ -1543,6 +1571,7 @@ def _write_single_block(mod, block, block_dir: Path, pkg: str, transpiler: JavaT
         body = transpiler.transpile_method(
             __import__("inspect").getsource(hooks["on_use"])
         )
+        body = guard_hook_body(body, hooks["on_use"], "world.isClient")
         method_blocks.append(f"""\
     @Override
     public ActionResult onUse(BlockState state, World world, BlockPos pos,
@@ -1558,6 +1587,7 @@ def _write_single_block(mod, block, block_dir: Path, pkg: str, transpiler: JavaT
         body = transpiler.transpile_method(
             __import__("inspect").getsource(hooks["on_place"])
         )
+        body = guard_hook_body(body, hooks["on_place"], "world.isClient")
         method_blocks.append(f"""\
     @Override
     public void onPlaced(World world, BlockPos pos, BlockState state,
@@ -1572,6 +1602,7 @@ def _write_single_block(mod, block, block_dir: Path, pkg: str, transpiler: JavaT
         body = transpiler.transpile_method(
             __import__("inspect").getsource(hooks["on_break"])
         )
+        body = guard_hook_body(body, hooks["on_break"], "world.isClient")
         method_blocks.append(f"""\
     @Override
     public void onBreak(World world, BlockPos pos, BlockState state, PlayerEntity player) {{
@@ -2031,22 +2062,24 @@ _RARITY_MAP = {
 }
 
 
-def _write_item_classes(mod: "Mod", java_root: Path, pkg: str, transpiler: JavaTranspiler):
+def _write_item_classes(mod: "Mod", java_root: Path, pkg: str, transpiler: JavaTranspiler, loader_name: str = "fabric"):
     if not mod._items:
         return
     item_dir = java_root / "item"
     item_dir.mkdir(exist_ok=True)
 
     for item in mod._items:
-        _write_single_item(mod, item, item_dir, pkg, transpiler)
+        _write_single_item(mod, item, item_dir, pkg, transpiler, loader_name)
 
 
-def _write_single_item(mod, item, item_dir: Path, pkg: str, transpiler: JavaTranspiler):
+def _write_single_item(mod, item, item_dir: Path, pkg: str, transpiler: JavaTranspiler, loader_name: str = "fabric"):
+    if write_music_disc_class(mod, item, item_dir, pkg, loader_name):
+        return
     cn = item.get_class_name()
     pkg_item = f"{pkg}.item"
     hooks = item.get_hooks()
 
-    settings_chain = f"new Item.Settings().maxCount({item.max_stack_size})"
+    settings_chain = f"new Item.Settings().maxCount({effective_stack_size(item)})"
     if item.max_damage > 0:
         settings_chain += f".maxDamage({item.max_damage})"
     rarity_java = _RARITY_MAP.get(item.rarity, "Rarity.COMMON")
@@ -2071,10 +2104,15 @@ def _write_single_item(mod, item, item_dir: Path, pkg: str, transpiler: JavaTran
 
     method_blocks = []
 
-    if "on_right_click" in hooks:
+    if "on_right_click" in hooks or item.open_inventory_on_use or item.open_screen_on_use:
         body = transpiler.transpile_method(
             __import__("inspect").getsource(hooks["on_right_click"])
-        )
+        ) if "on_right_click" in hooks else ""
+        body = guard_hook_body(body, hooks.get("on_right_click"), "world.isClient")
+        if item.open_inventory_on_use:
+            body += f"\n        if (!world.isClient) {{ {pkg}.item.FabricPyItemMenus.open(player, hand, stack); }}"
+        if item.open_screen_on_use:
+            body += f'\n        if (world.isClient) {{ {pkg}.client.ModScreens.openClient({json.dumps(item.open_screen_on_use)}); }}'
         method_blocks.append(f"""\
     @Override
     public TypedActionResult<ItemStack> use(World world, PlayerEntity user, Hand hand) {{
@@ -2085,6 +2123,9 @@ def _write_single_item(mod, item, item_dir: Path, pkg: str, transpiler: JavaTran
         return TypedActionResult.success(stack);
     }}""")
 
+    extension = attachment_item_client_extension(mod, item, pkg, loader_name)
+    if extension:
+        method_blocks.append(extension)
     methods_str = "\n\n".join(method_blocks)
 
     src = f"""\
@@ -2301,6 +2342,7 @@ def _write_events(mod: "Mod", java_root: Path, pkg: str, transpiler: JavaTranspi
     imports.add("import net.minecraft.registry.Registries;")
     imports.add("import net.minecraft.util.Identifier;")
     imports.add("import net.minecraft.item.ItemStack;")
+    imports.add("import net.minecraft.util.ActionResult;")
     imports.add("import net.minecraft.entity.effect.StatusEffectInstance;")
     imports.add("import net.minecraft.sound.SoundCategory;")
     imports.add("import net.minecraft.sound.SoundEvents;")
@@ -2345,6 +2387,8 @@ def _write_events(mod: "Mod", java_root: Path, pkg: str, transpiler: JavaTranspi
 
         imports.add(ev_info["import"])
         body = transpiler.transpile_method(ev["source"])
+        if ev_name in INTERACTION_EVENTS:
+            body = guard_hook_body(body, ev["func"], "world.isClient", side=ev.get("side", "server"))
         filled = ev_info["register"].format(body=body.strip())
         register_blocks.append(f"        {filled}")
 
@@ -2520,7 +2564,7 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str, loader_name: str = "f
     for dep in _deps_for_loader(mod, loader_name):
         if dep.mod_id and dep.required:
             fabric_mod["depends"][dep.mod_id] = dep.version_range or "*"
-    if _blocks_requiring_cutout(mod) or mod._keybinds or mod._packets:
+    if _blocks_requiring_cutout(mod) or mod._keybinds or mod._packets or _uses_geckolib(mod) or attachment_items(mod):
         fabric_mod["entrypoints"]["client"] = [f"{pkg}.{to_pascal(mod.mod_id)}Client"]
     if mod._mixins:
         fabric_mod["mixins"] = [f"{mod.mod_id}.mixins.json"]
@@ -2699,6 +2743,8 @@ def _write_resources(mod: "Mod", res_root: Path, pkg: str, loader_name: str = "f
     _copy_tree_if_exists(project_root / "assets" / mod.mod_id, res_root / "assets" / mod.mod_id)
     _copy_tree_if_exists(project_root / "data" / mod.mod_id, res_root / "data" / mod.mod_id)
     compile_bbmodels_in_assets(res_root / "assets" / mod.mod_id, mod.mod_id, project_root / "assets" / mod.mod_id)
+    write_music_disc_resources(mod, res_root)
+    write_attachment_resources(mod, res_root)
 
     # pack.mcmeta
     _write_text(res_root / "pack.mcmeta", json.dumps({
